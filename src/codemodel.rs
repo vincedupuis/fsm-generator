@@ -1343,7 +1343,10 @@ impl<'a> Builder<'a> {
             match self.options.submachines.get(href) {
                 Some(sub) => out.push((href.clone(), sub.clone())),
                 None => {
-                    return Err(format!("The state machine '{href}' used by {} was not provided.", self.label(Some(v))));
+                    return Err(format!(
+                        "The state machine '{href}' used by {} was not provided.",
+                        self.label(Some(v))
+                    ));
                 }
             }
         }
