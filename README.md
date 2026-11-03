@@ -19,6 +19,8 @@ cargo test
 
 The program is a single executable without dependencies. Templates are files, not built into it: ship it with the `templates/` folder next to it, where `-t <name>` finds them.
 
+Prebuilt executables for Linux and macOS (x64, arm64) and Windows (x64), each with its `templates/` folder, are on the [Releases](https://github.com/vincedupuis/fsm-generator/releases) page.
+
 ## Usage
 
 ```sh

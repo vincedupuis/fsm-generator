@@ -35,3 +35,7 @@ One module per TypeScript file of the vscode edition, with the same logic, order
 - Templates are data: no filter or function may run code or read files from the template's repository.
 - Template-facing names (filters, functions, variables, the `file` block) are documented in `README.md`; update it when they change.
 - Out of scope, as in the other editions: state machine inheritance/redefinition and the transition-oriented notation.
+
+## Releasing
+
+From the umbrella repo, on a clean, pushed main: `./release.sh generator <version>`. It sets the version in `Cargo.toml` and `Cargo.lock` (`-v` prints `CARGO_PKG_VERSION`), commits "Release <version>", tags `v<version>` and pushes. The tag starts `.github/workflows/release.yml`: `cargo test`, a release build per platform (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64`), each archived as `fsm-generator-<version>-<platform>.tar.gz` (`.zip` on Windows) with the executable and `templates/` next to it, attached to the GitHub Release. A tag can't be reused: if the workflow fails, fix, push and release the next patch version. Check the run with `gh run list -R vincedupuis/fsm-generator`.

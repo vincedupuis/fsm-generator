@@ -1,0 +1,98 @@
+# On a version tag (v0.1.0), tests fsm-generator, builds it for every platform and
+# attaches the builds to the GitHub Release of that tag: per platform, an archive of
+# the executable with the templates/ folder next to it, where `-t <name>` finds them.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the package version
+        run: |
+          version=$(sed -nE 's/^version *= *"(.*)"/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match the package version $version" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test --locked
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - { platform: linux-x64, runner: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { platform: darwin-x64, runner: macos-latest, target: x86_64-apple-darwin }
+          - { platform: darwin-arm64, runner: macos-latest, target: aarch64-apple-darwin }
+          - { platform: windows-x64, runner: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Links the C runtime statically, so the Windows executable doesn't need the VC++ redistributable.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package the executable with its templates
+        shell: bash
+        run: |
+          dir="fsm-generator-${GITHUB_REF_NAME#v}-${{ matrix.platform }}"
+          release="target/${{ matrix.target }}/release"
+          mkdir -p "$RUNNER_TEMP/$dir" "$RUNNER_TEMP/dist"
+          cp -R templates "$RUNNER_TEMP/$dir"
+          cd "$RUNNER_TEMP"
+          case "$dir" in
+            *-windows-*)
+              cp "$GITHUB_WORKSPACE/$release/fsm-generator.exe" "$dir"
+              7z a -tzip "dist/$dir.zip" "$dir" > /dev/null ;;
+            *)
+              cp "$GITHUB_WORKSPACE/$release/fsm-generator" "$dir"
+              tar czf "dist/$dir.tar.gz" "$dir" ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+
+      - name: Attach the builds to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          assets=("$RUNNER_TEMP"/dist/fsm-generator-$version-*)
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --title "fsm-generator $version" --generate-notes
+          fi
