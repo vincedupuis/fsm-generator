@@ -31,7 +31,7 @@ One module per TypeScript file of the vscode edition, with the same logic, order
 
 ## Rules
 
-- **Parity:** the code model must stay identical to the vscode edition's `toCodeModel()` (including its quirks: transitions keep the `via` trail the TypeScript gives them), validation messages identical, and `templates/ts.jinja` and `templates/sml.jinja` must generate byte-identical files to `ts.hbs` and `sml.hbs`. A change to the code model, the validator or a template there needs the same change here, and the reverse.
+- **Parity:** the code model must stay identical to the vscode edition's `toCodeModel()`, validation messages identical, and `templates/ts.jinja` and `templates/sml.jinja` must generate byte-identical files to `ts.hbs` and `sml.hbs`. A change to the code model, the validator or a template there needs the same change here, and the reverse.
 - Templates are data: no filter or function may run code or read files from the template's repository.
 - Template-facing names (filters, functions, variables, the `file` block) are documented in `README.md`; update it when they change.
 - Out of scope, as in the other editions: state machine inheritance/redefinition and the transition-oriented notation.

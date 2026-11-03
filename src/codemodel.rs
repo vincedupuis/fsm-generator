@@ -1752,6 +1752,10 @@ impl<'a> Builder<'a> {
     }
 
     fn region(&mut self, index: usize) -> Result<CodeRegion, String> {
+        // The default entry belongs to no transition: a trail of its own keeps its pseudostates out of the last
+        // transition's via.
+        self.trails.push(Vec::new());
+        self.trail = self.trails.len() - 1;
         let (id, name_attr, owner) = {
             let r = &self.region_list[index];
             (r.id, r.name, r.owner)
@@ -1796,6 +1800,9 @@ impl<'a> Builder<'a> {
     }
 
     fn entry_point(&mut self, v: usize) -> Result<CodeEntryPoint, String> {
+        // Like a default entry, the machine's entry point belongs to no transition (see region()).
+        self.trails.push(Vec::new());
+        self.trail = self.trails.len() - 1;
         let vx = self.ix.v(v);
         let outs = self.ix.outgoing(&vx.id);
         let mut alts = one(Vec::new());
