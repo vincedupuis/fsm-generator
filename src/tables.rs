@@ -281,14 +281,18 @@ struct Origin {
     key: String,
     label: String,
     id: String,
+    /// The pseudostates it goes through, each noted.
     via: Vec<CodeVia>,
+    /// Those of `via` on the way being lowered, without the branches of its choices (each a way of its own): they
+    /// explain leaving or entering a composite state from inside, which then needs no note of its own.
+    way: Vec<CodeVia>,
     /// Set while lowering, shared with the branches of its choices.
     found: Rc<RefCell<Found>>,
 }
 
 impl Origin {
-    fn new(key: String, label: String, id: String, via: Vec<CodeVia>) -> Origin {
-        Origin { key, label, id, via, found: Rc::default() }
+    fn new(key: String, label: String, id: String, via: Vec<CodeVia>, way: Vec<CodeVia>) -> Origin {
+        Origin { key, label, id, via, way, found: Rc::default() }
     }
 }
 
@@ -313,6 +317,31 @@ struct Lowering<'a> {
     problems: Vec<TableNote>,
     completion_events: Vec<Option<Ref>>,
     timer_events: Vec<Ref>,
+}
+
+/// The pseudostates of `via` on the way through `steps`, without those of the branches of its choices.
+fn way_via(via: &[CodeVia], steps: &[Step]) -> Vec<CodeVia> {
+    fn visit<'s>(steps: &'s [Step], branches: &mut HashSet<&'s str>) {
+        for st in steps {
+            match st {
+                Step::Choice { branches: list, .. } => {
+                    for v in list.iter().flat_map(|b| &b.via) {
+                        branches.insert(v.id.as_str());
+                    }
+                }
+                Step::RestoreHistory { default_steps, .. } => visit(default_steps, branches),
+                _ => {}
+            }
+        }
+    }
+    let mut branches = HashSet::new();
+    visit(steps, &mut branches);
+    via.iter().filter(|v| !branches.contains(v.id.as_str())).cloned().collect()
+}
+
+/// Whether the way `origin` is lowering goes through a pseudostate of one of `kinds`.
+fn explains(origin: &Origin, kinds: &[&str]) -> bool {
+    origin.way.iter().any(|v| kinds.contains(&v.kind))
 }
 
 fn pseudo(name: String, role: &'static str) -> TableState {
@@ -485,7 +514,7 @@ impl<'a> Lowering<'a> {
         let mut entry_points = Vec::new();
         for p in &cm.entry_points {
             let label = format!("entry point {}", p.name);
-            let origin = Origin::new(label.clone(), label, p.id.clone(), Vec::new());
+            let origin = Origin::new(label.clone(), label, p.id.clone(), Vec::new(), Vec::new());
             let top: Vec<usize> = cm.top_regions.iter().map(|r| r.index).collect();
             let (actions, end) = self.route_regions(&top, &p.steps, 0, &origin, None);
             if end < p.steps.len() {
@@ -667,6 +696,7 @@ impl<'a> Lowering<'a> {
             format!("initial transition of {}", region.display_name),
             String::new(),
             Vec::new(),
+            Vec::new(),
         );
         if !region.default_steps.is_empty() {
             self.lower_init(r, vec![GuardTerm::Defaults { region: r }], &region.default_steps, &origin);
@@ -812,7 +842,8 @@ impl<'a> Lowering<'a> {
             if let Some(p) = &c.precondition {
                 guard.push(GuardTerm::Precondition { condition: p.clone(), label: c.label.clone() });
             }
-            let origin = Origin::new(format!("t{}", tr.index), tr.label.clone(), tr.id.clone(), tr.via.clone());
+            let way = way_via(&tr.via, &tr.steps);
+            let origin = Origin::new(format!("t{}", tr.index), tr.label.clone(), tr.id.clone(), tr.via.clone(), way);
             if !local {
                 let src = self.state_of(s.index);
                 let key = self.table_of_state(s.index);
@@ -950,7 +981,9 @@ impl<'a> Lowering<'a> {
             all.push(TableAction::Continue { event: next });
             let from_name = if src.kind == "state" { src.name.clone() } else { "a choice".to_string() };
             self.add(key, row(src, trigger, guard, all, target, comment), rank);
-            origin.found.borrow_mut().left = Some((from_name, cm.states[hops[hops.len() - 1].exit].name.clone()));
+            if !explains(origin, &["exitPoint", "join"]) {
+                origin.found.borrow_mut().left = Some((from_name, cm.states[hops[hops.len() - 1].exit].name.clone()));
+            }
         }
         for k in from..hops.len() {
             self.hop(origin, &hops, k, entries);
@@ -1168,7 +1201,9 @@ impl<'a> Lowering<'a> {
             if pre.is_empty() && region_steps == cm.regions[r].default_steps.as_slice() {
                 continue;
             }
-            if let Some(state) = state {
+            if let Some(state) = state
+                && !explains(origin, &["entryPoint", "fork", "shallowHistory", "deepHistory"])
+            {
                 let mut found = origin.found.borrow_mut();
                 if found.entered.is_none() {
                     let target = match st {
@@ -1233,7 +1268,12 @@ impl<'a> Lowering<'a> {
                 Some(g) => vec![GuardTerm::Condition { condition: g.clone() }],
                 None => Vec::new(),
             };
-            let branch = Origin { key: format!("{}|{}.{n}", origin.key, p.name), ..origin.clone() };
+            // Each branch is a way of its own. Only pseudostates the origin notes count (default entries and the
+            // machine's entry points note none).
+            let noted: Vec<CodeVia> =
+                origin.via.iter().filter(|v| b.via.iter().any(|x| x.id == v.id)).cloned().collect();
+            let way = way_via(&noted, &b.steps);
+            let branch = Origin { key: format!("{}|{}.{n}", origin.key, p.name), way, ..origin.clone() };
             self.lower_fire(p.clone(), key, None, guard, &b.steps, &branch, 1, vec![]);
         }
         if !has_else {
@@ -1245,9 +1285,8 @@ impl<'a> Lowering<'a> {
 
     // -------------------------------------------------------------- notes
 
-    /// What lowering `origin` worked around, named after the pseudostates it went through when there are some.
+    /// What lowering `origin` worked around: the pseudostates it went through, and what none of them explains.
     fn note_origin(&mut self, origin: &Origin) {
-        let via_of = |kinds: &[&str]| origin.via.iter().filter(|v| kinds.contains(&v.kind)).count();
         for v in origin
             .via
             .iter()
@@ -1261,14 +1300,10 @@ impl<'a> Lowering<'a> {
             self.notes.push(note(kind, &v.id, &v.name, "", detail));
         }
         let found = origin.found.borrow();
-        if let Some((from, through)) = &found.left
-            && via_of(&["exitPoint", "join"]) == 0
-        {
+        if let Some((from, through)) = &found.left {
             self.notes.push(note("leave", &origin.id, &origin.label, from, through));
         }
-        if let Some((state, target)) = &found.entered
-            && via_of(&["entryPoint", "fork", "shallowHistory", "deepHistory"]) == 0
-        {
+        if let Some((state, target)) = &found.entered {
             self.notes.push(note("enter", &origin.id, &origin.label, state, target));
         }
     }

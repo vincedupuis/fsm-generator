@@ -210,7 +210,8 @@ pub struct CodeTransition {
     pub name: String,
     /// Readable description, e.g. `Paused -> Stopped (after(5m))`.
     pub label: String,
-    /// Pseudostates the transition goes through, in the order reached.
+    /// Pseudostates the transition goes through, in the order reached: those of its own way through junctions, and
+    /// those of every branch of its choices.
     pub via: Vec<CodeVia>,
     /// `external`, `internal`, `local`, `join` or `exitPoint`.
     pub kind: &'static str,
@@ -220,7 +221,7 @@ pub struct CodeTransition {
     pub steps: Vec<Step>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CodeVia {
     pub kind: &'static str,
     /// Name of the pseudostate, or of the state owning an entry/exit point (`On.fault`).
@@ -361,6 +362,8 @@ pub struct ChoiceBranch {
     pub guard: Option<Condition>,
     pub is_else: bool,
     pub steps: Vec<Step>,
+    /// Pseudostates the branch goes through after the choice, in the order reached.
+    pub via: Vec<CodeVia>,
 }
 
 /// A choice step; `has_else` tells whether the last branch is always taken.
@@ -382,15 +385,28 @@ pub fn to_code_model(model: &FsmModel, options: &Options) -> Result<CodeModel, S
 
 // ------------------------------------------------------------------ helpers
 
-/// A way through a compound transition: taken when `guard` holds, doing `steps`.
+/// A way through a compound transition: taken when `guard` holds, doing `steps`, through the pseudostates `via`.
 #[derive(Clone)]
 struct Alt {
     guard: Option<Condition>,
     steps: Vec<Step>,
+    via: Vec<CodeVia>,
 }
 
 fn one(steps: Vec<Step>) -> Vec<Alt> {
-    vec![Alt { guard: None, steps }]
+    vec![Alt { guard: None, steps, via: Vec::new() }]
+}
+
+/// The pseudostates of `a`, then those of `b` not reached already.
+fn join_via(a: &[CodeVia], b: &[CodeVia]) -> Vec<CodeVia> {
+    let mut out = a.to_vec();
+    out.extend(b.iter().filter(|v| !a.iter().any(|x| x.id == v.id)).cloned());
+    out
+}
+
+/// The pseudostates of all of `ways`, in order.
+fn union_via<'v>(ways: impl IntoIterator<Item = &'v Vec<CodeVia>>) -> Vec<CodeVia> {
+    ways.into_iter().fold(Vec::new(), |all, via| join_via(&all, via))
 }
 
 fn and(a: Option<Condition>, b: Option<Condition>) -> Option<Condition> {
@@ -439,7 +455,7 @@ fn seq(a: Vec<Alt>, b: Vec<Alt>) -> Vec<Alt> {
         for y in &b {
             let mut steps = x.steps.clone();
             steps.extend(y.steps.iter().cloned());
-            out.push(Alt { guard: and(x.guard.clone(), y.guard.clone()), steps });
+            out.push(Alt { guard: and(x.guard.clone(), y.guard.clone()), steps, via: join_via(&x.via, &y.via) });
         }
     }
     out
@@ -573,16 +589,11 @@ struct Builder<'a> {
     conditions: OrderedSet,
     activities: OrderedSet,
     transitions: Vec<CodeTransition>,
-    /// The trail (in `trails`) holding each transition's `via`.
-    transition_trails: Vec<usize>,
     transition_names: Names,
     fire_cache: HashMap<String, Vec<Fireable>>,
     features: CodeFeatures,
     /// Junctions on the way being compiled, to report cycles.
     junction_path: Vec<String>,
-    /// Pseudostates reached while compiling transitions (see CodeTransition::via); `trail` is the current one.
-    trails: Vec<Vec<CodeVia>>,
-    trail: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -606,13 +617,10 @@ impl<'a> Builder<'a> {
             conditions: OrderedSet::default(),
             activities: OrderedSet::default(),
             transitions: Vec::new(),
-            transition_trails: Vec::new(),
             transition_names: Names::default(),
             fire_cache: HashMap::new(),
             features: CodeFeatures::default(),
             junction_path: Vec::new(),
-            trails: vec![Vec::new()],
-            trail: 0,
         }
     }
 
@@ -737,10 +745,7 @@ impl<'a> Builder<'a> {
         for r in self.top_region_ids.clone() {
             start.push(self.enter_region_step(r)?);
         }
-        let mut transitions = std::mem::take(&mut self.transitions);
-        for (t, &trail) in transitions.iter_mut().zip(&self.transition_trails) {
-            t.via = self.trails[trail].clone();
-        }
+        let transitions = std::mem::take(&mut self.transitions);
         let mut code = CodeModel {
             machine: CodeMachine {
                 name: ident(&m.name, "StateMachine"),
@@ -1066,23 +1071,23 @@ impl<'a> Builder<'a> {
             return Ok(alts.pop().unwrap().steps);
         }
         self.features.choices = true;
-        let branches =
-            alts.into_iter().map(|a| ChoiceBranch { guard: a.guard, is_else: false, steps: a.steps }).collect();
+        let branches = alts
+            .into_iter()
+            .map(|a| ChoiceBranch { guard: a.guard, is_else: false, steps: a.steps, via: a.via })
+            .collect();
         Ok(vec![choice(label.to_string(), branches, self.region_ref(region)?)])
     }
 
-    fn via(&mut self, v: usize) {
+    /// The pseudostate `v` as an element of `via`.
+    fn via_of(&self, v: usize) -> CodeVia {
         let vx = self.ix.v(v);
-        if self.trails[self.trail].iter().any(|x| x.id == vx.id) {
-            return;
-        }
         let on_border = vx.vtype != VertexType::ConnectionPointRef && self.ix.is_border(v);
         let name = if on_border {
             format!("{}.{}", self.label(self.ix.vertex(&vx.parent)), self.label(Some(v)))
         } else {
             self.label(Some(v))
         };
-        self.trails[self.trail].push(CodeVia { kind: vx.vtype.as_str(), name, id: vx.id.clone() });
+        CodeVia { kind: vx.vtype.as_str(), name, id: vx.id.clone() }
     }
 
     /// Exits for a transition from `pos` whose domain is `domain`.
@@ -1178,17 +1183,25 @@ impl<'a> Builder<'a> {
         Ok(alts)
     }
 
-    /// Arriving at `v`, which sits directly in `region`.
+    /// Arriving at `v`, which sits directly in `region`: every way on from it goes through it.
     fn reach(&mut self, v: usize, region: &str) -> Result<Vec<Alt>, String> {
+        let alts = self.arrive(v, region)?;
         let vx = self.ix.v(v);
-        let outs = self.ix.outgoing(&vx.id);
         let machine_point =
             matches!(vx.vtype, VertexType::EntryPoint | VertexType::ExitPoint) && !self.ix.has_vertex(&vx.parent);
-        if !matches!(vx.vtype, VertexType::State | VertexType::Final | VertexType::Initial | VertexType::Terminate)
-            && !machine_point
+        if matches!(vx.vtype, VertexType::State | VertexType::Final | VertexType::Initial | VertexType::Terminate)
+            || machine_point
         {
-            self.via(v);
+            return Ok(alts);
         }
+        let own = [self.via_of(v)];
+        Ok(alts.into_iter().map(|a| Alt { via: join_via(&own, &a.via), ..a }).collect())
+    }
+
+    /// The ways on from `v` (see reach()).
+    fn arrive(&mut self, v: usize, region: &str) -> Result<Vec<Alt>, String> {
+        let vx = self.ix.v(v);
+        let outs = self.ix.outgoing(&vx.id);
         match vx.vtype {
             VertexType::State => {
                 let mut alts = one(vec![self.enter_step(v)?]);
@@ -1247,11 +1260,14 @@ impl<'a> Builder<'a> {
                 let mut branches = Vec::new();
                 for t in ordered {
                     let guard = self.guard_of(t)?;
-                    let segment = self.segment(v, t)?;
-                    let steps = self.alts_to_steps(segment, &label, region)?;
-                    branches.push(ChoiceBranch { guard, is_else: is_else(t), steps });
+                    let ways = self.segment(v, t)?;
+                    let via = union_via(ways.iter().map(|w| &w.via));
+                    let steps = self.alts_to_steps(ways, &label, region)?;
+                    branches.push(ChoiceBranch { guard, is_else: is_else(t), steps, via });
                 }
-                Ok(one(vec![choice(label, branches, r)]))
+                // One way through the choice, going through the pseudostates of all its branches.
+                let via = union_via(branches.iter().map(|b| &b.via));
+                Ok(vec![Alt { guard: None, steps: vec![choice(label, branches, r)], via }])
             }
             VertexType::Junction => {
                 if self.junction_path.contains(&vx.id) {
@@ -1265,19 +1281,21 @@ impl<'a> Builder<'a> {
             VertexType::ShallowHistory | VertexType::DeepHistory => {
                 self.features.history = true;
                 let r = self.region_ref(region)?;
-                let default_steps = match outs.first() {
+                let (default_steps, via) = match outs.first() {
                     Some(t) => {
-                        let segment = self.segment(v, t)?;
-                        self.alts_to_steps(segment, "history default", region)?
+                        let ways = self.segment(v, t)?;
+                        let via = union_via(ways.iter().map(|w| &w.via));
+                        (self.alts_to_steps(ways, "history default", region)?, via)
                     }
-                    None => vec![self.enter_region_step(region)?],
+                    None => (vec![self.enter_region_step(region)?], Vec::new()),
                 };
-                Ok(one(vec![Step::RestoreHistory {
+                let step = Step::RestoreHistory {
                     region: r.name,
                     region_index: r.index,
                     deep: vx.vtype == VertexType::DeepHistory,
                     default_steps,
-                }]))
+                };
+                Ok(vec![Alt { guard: None, steps: vec![step], via }])
             }
             VertexType::Fork => {
                 let mut effects = Vec::new();
@@ -1316,12 +1334,12 @@ impl<'a> Builder<'a> {
         let mut out = Vec::new();
         for (i, t) in guarded.iter().enumerate() {
             let segment = self.segment(v, t)?;
-            out.extend(seq(vec![Alt { guard: guards[i].clone(), steps: Vec::new() }], segment));
+            out.extend(seq(vec![Alt { guard: guards[i].clone(), steps: Vec::new(), via: Vec::new() }], segment));
         }
         if let Some(else_t) = outs.iter().find(|t| is_else(t)) {
             let others = or(guards.into_iter().flatten().collect());
             let segment = self.segment(v, else_t)?;
-            out.extend(seq(vec![Alt { guard: others.map(not), steps: Vec::new() }], segment));
+            out.extend(seq(vec![Alt { guard: others.map(not), steps: Vec::new(), via: Vec::new() }], segment));
         }
         Ok(out)
     }
@@ -1387,14 +1405,9 @@ impl<'a> Builder<'a> {
         if let Some(cached) = self.fire_cache.get(&key) {
             return Ok(cached.clone());
         }
-        self.trails.push(Vec::new());
-        self.trail = self.trails.len() - 1;
-        if !self.is_state(pos) {
-            self.via(pos);
-        }
+        let own = if self.is_state(pos) { Vec::new() } else { vec![self.via_of(pos)] };
         let segment = self.segment(pos, t)?;
         let mut alts = seq(one(prefix), segment);
-        let via = self.trail;
         let post = if self.model.kind == MachineKind::Protocol {
             self.condition(&t.postcondition, &format!("Postcondition of {label}"))?
         } else {
@@ -1425,13 +1438,12 @@ impl<'a> Builder<'a> {
                 id: t.id.clone(),
                 name,
                 label: label.to_string(),
-                via: Vec::new(),
+                via: join_via(&own, &a.via),
                 kind,
                 source_index: source.index,
                 source: source.clone(),
                 steps: a.steps,
             });
-            self.transition_trails.push(via);
             list.push((index, a.guard));
         }
         self.fire_cache.insert(key, list.clone());
@@ -1545,15 +1557,12 @@ impl<'a> Builder<'a> {
                 if let Some(o) = out {
                     steps.extend(self.effect(o)?);
                 }
-                self.trails.push(Vec::new());
-                self.trail = self.trails.len() - 1;
-                self.via(j);
                 let entered = match target {
                     Some(target) => self.enter_domain(domain, &[target])?,
                     None => one(Vec::new()),
                 };
                 let alts = seq(one(steps), entered);
-                let via = self.trail;
+                let via = join_via(&[self.via_of(j)], &union_via(alts.iter().map(|a| &a.via)));
                 let source = requires.first().cloned().ok_or_else(|| format!("{label} has no source state."))?;
                 let name = self.transition_names.take(&ident(&format!("join_{}", names.join("_")), "x"));
                 let steps = self.alts_to_steps(alts, &label, domain.unwrap_or(self.top_region_ids[0]))?;
@@ -1563,13 +1572,12 @@ impl<'a> Builder<'a> {
                     id: jv.id.clone(),
                     name,
                     label: label.clone(),
-                    via: Vec::new(),
+                    via,
                     kind: "join",
                     source_index: source.index,
                     source,
                     steps,
                 });
-                self.transition_trails.push(via);
                 self.fire_cache.insert(key, vec![(index, None)]);
                 index
             }
@@ -1755,10 +1763,6 @@ impl<'a> Builder<'a> {
     }
 
     fn region(&mut self, index: usize) -> Result<CodeRegion, String> {
-        // The default entry belongs to no transition: a trail of its own keeps its pseudostates out of the last
-        // transition's via.
-        self.trails.push(Vec::new());
-        self.trail = self.trails.len() - 1;
         let (id, name_attr, owner) = {
             let r = &self.region_list[index];
             (r.id, r.name, r.owner)
@@ -1803,9 +1807,6 @@ impl<'a> Builder<'a> {
     }
 
     fn entry_point(&mut self, v: usize) -> Result<CodeEntryPoint, String> {
-        // Like a default entry, the machine's entry point belongs to no transition (see region()).
-        self.trails.push(Vec::new());
-        self.trail = self.trails.len() - 1;
         let vx = self.ix.v(v);
         let outs = self.ix.outgoing(&vx.id);
         let mut alts = one(Vec::new());
