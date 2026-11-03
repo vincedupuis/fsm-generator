@@ -1,0 +1,20 @@
+[package]
+name = "fsm-generator"
+version = "0.1.0"
+edition = "2024"
+description = "Generates code from UML state machines (.fsm files: XMI 2.5.1) with Jinja templates"
+license = "MIT"
+
+[[bin]]
+name = "fsm-generator"
+path = "src/main.rs"
+
+[dependencies]
+minijinja = { version = "3.0.5", features = ["json", "serde", "preserve_order"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = "1.0.154"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
