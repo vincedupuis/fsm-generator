@@ -379,7 +379,20 @@ pub struct Options {
     pub source_file: String,
 }
 
-pub fn to_code_model(model: &FsmModel, options: &Options) -> Result<CodeModel, String> {
+/// A model the code generator can't handle.
+pub struct CodeGenError {
+    pub message: String,
+    /// xmi:id of the element it is about.
+    pub id: String,
+}
+
+impl CodeGenError {
+    fn new(id: &str, message: String) -> CodeGenError {
+        CodeGenError { message, id: id.to_string() }
+    }
+}
+
+pub fn to_code_model(model: &FsmModel, options: &Options) -> Result<CodeModel, CodeGenError> {
     Builder::new(model, options).build()
 }
 
@@ -661,7 +674,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn build(mut self) -> Result<CodeModel, String> {
+    fn build(mut self) -> Result<CodeModel, CodeGenError> {
         let m = self.model;
         // Structure, depth first.
         for (i, r) in m.regions.iter().enumerate() {
@@ -855,17 +868,20 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn state_ref(&self, v: usize) -> Result<Ref, String> {
+    fn state_ref(&self, v: usize) -> Result<Ref, CodeGenError> {
         match self.state_index.get(self.ix.v(v).id.as_str()) {
             Some(&index) => Ok(Ref { name: self.state_names[index].clone(), index }),
-            None => Err(format!("{} is not in a region of the state machine.", self.label(Some(v)))),
+            None => Err(CodeGenError::new(
+                &self.ix.v(v).id,
+                format!("{} is not in a region of the state machine.", self.label(Some(v))),
+            )),
         }
     }
 
-    fn region_ref(&self, id: &str) -> Result<Ref, String> {
+    fn region_ref(&self, id: &str) -> Result<Ref, CodeGenError> {
         match self.region_index.get(id) {
             Some(&index) => Ok(Ref { name: self.region_names[index].clone(), index }),
-            None => Err(format!("Unknown region '{id}'.")),
+            None => Err(CodeGenError::new(id, format!("Unknown region '{id}'."))),
         }
     }
 
@@ -909,7 +925,7 @@ impl<'a> Builder<'a> {
         self.events.len() - 1
     }
 
-    fn timer(&mut self, state: usize, trigger: &str) -> Result<usize, String> {
+    fn timer(&mut self, state: usize, trigger: &str) -> Result<usize, CodeGenError> {
         let text: String = trigger.chars().filter(|c| !c.is_whitespace()).collect();
         let key = format!("{}|{text}", self.ix.v(state).id);
         if let Some(&known) = self.timer_by_key.get(&key) {
@@ -935,7 +951,7 @@ impl<'a> Builder<'a> {
         Ok(self.timers.len() - 1)
     }
 
-    fn signal_of(&mut self, state: usize, trigger: &str) -> Result<CodeSignal, String> {
+    fn signal_of(&mut self, state: usize, trigger: &str) -> Result<CodeSignal, CodeGenError> {
         let index = if expr::time_trigger_ms(trigger).is_some() {
             let t = self.timer(state, trigger)?;
             self.timers[t].signal_index
@@ -948,8 +964,9 @@ impl<'a> Builder<'a> {
 
     // -------------------------------------------------------------- text
 
-    fn calls(&mut self, text: &str, what: &str, into: SetKind) -> Result<Vec<String>, String> {
-        let calls = expr::parse_actions(text).map_err(|e| format!("{what}: {e}"))?;
+    /// The calls of a behavior of the element `id`.
+    fn calls(&mut self, text: &str, what: &str, id: &str, into: SetKind) -> Result<Vec<String>, CodeGenError> {
+        let calls = expr::parse_actions(text).map_err(|e| CodeGenError::new(id, format!("{what}: {e}")))?;
         let set = match into {
             SetKind::Actions => &mut self.actions,
             SetKind::Activities => &mut self.activities,
@@ -960,8 +977,9 @@ impl<'a> Builder<'a> {
         Ok(calls)
     }
 
-    fn condition(&mut self, text: &str, what: &str) -> Result<Option<Condition>, String> {
-        let c = expr::parse_condition(text).map_err(|e| format!("{what}: {e}"))?;
+    /// A constraint of the element `id`.
+    fn condition(&mut self, text: &str, what: &str, id: &str) -> Result<Option<Condition>, CodeGenError> {
+        let c = expr::parse_condition(text).map_err(|e| CodeGenError::new(id, format!("{what}: {e}")))?;
         fn visit(c: &Condition, set: &mut OrderedSet) {
             match c {
                 Condition::Call { name } => set.add(name),
@@ -975,18 +993,18 @@ impl<'a> Builder<'a> {
         Ok(c)
     }
 
-    fn guard_of(&mut self, t: &Transition) -> Result<Option<Condition>, String> {
+    fn guard_of(&mut self, t: &Transition) -> Result<Option<Condition>, CodeGenError> {
         if is_else(t) {
             return Ok(None);
         }
         let what = format!("Guard of {}", self.transition_label(t));
-        self.condition(&t.guard, &what)
+        self.condition(&t.guard, &what, &t.id)
     }
 
-    fn effect(&mut self, t: &Transition) -> Result<Vec<Step>, String> {
+    fn effect(&mut self, t: &Transition) -> Result<Vec<Step>, CodeGenError> {
         let label = self.transition_label(t);
         Ok(self
-            .calls(&t.effect, &format!("Effect of {label}"), SetKind::Actions)?
+            .calls(&t.effect, &format!("Effect of {label}"), &t.id, SetKind::Actions)?
             .into_iter()
             .map(|action| Step::Call { action })
             .collect())
@@ -1000,12 +1018,12 @@ impl<'a> Builder<'a> {
 
     // -------------------------------------------------------------- geometry of the hierarchy
 
-    fn vertex(&self, id: &str) -> Result<usize, String> {
-        self.ix.vertex(id).ok_or_else(|| format!("Unknown vertex '{id}'."))
+    fn vertex(&self, id: &str) -> Result<usize, CodeGenError> {
+        self.ix.vertex(id).ok_or_else(|| CodeGenError::new(id, format!("Unknown vertex '{id}'.")))
     }
 
     /// The region a vertex sits in; the owner's region for entry/exit points and connection point references.
-    fn region_of(&self, v: usize) -> Result<&'a str, String> {
+    fn region_of(&self, v: usize) -> Result<&'a str, CodeGenError> {
         if self.ix.is_border(v) {
             return Ok(&self.ix.v(self.vertex(&self.ix.v(v).parent)?).parent);
         }
@@ -1013,7 +1031,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Regions containing `v`, outermost first.
-    fn chain(&self, v: usize) -> Result<Vec<&'a str>, String> {
+    fn chain(&self, v: usize) -> Result<Vec<&'a str>, CodeGenError> {
         let mut out = Vec::new();
         let mut r = Some(self.region_of(v)?);
         let mut seen = HashSet::new();
@@ -1026,7 +1044,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Innermost region containing all of `vs`; None when they are in different top-level regions.
-    fn common_region(&self, vs: &[usize]) -> Result<Option<&'a str>, String> {
+    fn common_region(&self, vs: &[usize]) -> Result<Option<&'a str>, CodeGenError> {
         let chains = vs.iter().map(|&v| self.chain(v)).collect::<Result<Vec<_>, _>>()?;
         if chains.is_empty() {
             return Ok(None);
@@ -1041,8 +1059,8 @@ impl<'a> Builder<'a> {
     }
 
     /// The vertex directly in `region` (or at the top level when None) on the way to `v`.
-    fn child_on_path(&self, v: usize, region: Option<&str>) -> Result<usize, String> {
-        let in_region = |x: usize| -> Result<bool, String> {
+    fn child_on_path(&self, v: usize, region: Option<&str>) -> Result<usize, CodeGenError> {
+        let in_region = |x: usize| -> Result<bool, CodeGenError> {
             let r = self.region_of(x)?;
             Ok(match region {
                 None => self.top_region_ids.contains(&r),
@@ -1057,7 +1075,7 @@ impl<'a> Builder<'a> {
                 return Ok(a);
             }
         }
-        Err(format!("{} is not inside the expected region.", self.label(Some(v))))
+        Err(CodeGenError::new(&self.ix.v(v).id, format!("{} is not inside the expected region.", self.label(Some(v)))))
     }
 
     fn is_state(&self, v: usize) -> bool {
@@ -1066,28 +1084,28 @@ impl<'a> Builder<'a> {
 
     // -------------------------------------------------------------- steps
 
-    fn enter_step(&self, v: usize) -> Result<Step, String> {
+    fn enter_step(&self, v: usize) -> Result<Step, CodeGenError> {
         let r = self.state_ref(v)?;
         Ok(Step::Enter { state: r.name, state_index: r.index })
     }
 
-    fn exit_step(&self, v: usize) -> Result<Step, String> {
+    fn exit_step(&self, v: usize) -> Result<Step, CodeGenError> {
         let r = self.state_ref(v)?;
         Ok(Step::Exit { state: r.name, state_index: r.index })
     }
 
-    fn enter_region_step(&self, id: &str) -> Result<Step, String> {
+    fn enter_region_step(&self, id: &str) -> Result<Step, CodeGenError> {
         let r = self.region_ref(id)?;
         Ok(Step::EnterRegion { region: r.name, region_index: r.index })
     }
 
-    fn exit_region_step(&self, id: &str) -> Result<Step, String> {
+    fn exit_region_step(&self, id: &str) -> Result<Step, CodeGenError> {
         let r = self.region_ref(id)?;
         Ok(Step::ExitRegion { region: r.name, region_index: r.index })
     }
 
     /// `alts` as steps: a choice evaluated in `region` when there are several ways.
-    fn alts_to_steps(&mut self, mut alts: Vec<Alt>, label: &str, region: &str) -> Result<Vec<Step>, String> {
+    fn alts_to_steps(&mut self, mut alts: Vec<Alt>, label: &str, region: &str) -> Result<Vec<Step>, CodeGenError> {
         if alts.len() == 1 && alts[0].guard.is_none() {
             return Ok(alts.pop().unwrap().steps);
         }
@@ -1112,7 +1130,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Exits for a transition from `pos` whose domain is `domain`.
-    fn exits_from(&self, pos: usize, domain: Option<&str>) -> Result<Vec<Step>, String> {
+    fn exits_from(&self, pos: usize, domain: Option<&str>) -> Result<Vec<Step>, CodeGenError> {
         let Some(domain) = domain else {
             return self.top_region_ids.iter().map(|r| self.exit_region_step(r)).collect();
         };
@@ -1121,7 +1139,7 @@ impl<'a> Builder<'a> {
     }
 
     /// One segment of a compound transition, from `pos` (a state or a pseudostate already reached).
-    fn segment(&mut self, pos: usize, t: &'a Transition) -> Result<Vec<Alt>, String> {
+    fn segment(&mut self, pos: usize, t: &'a Transition) -> Result<Vec<Alt>, CodeGenError> {
         let target = self.vertex(&t.target)?;
         if t.kind == TransitionKind::Internal {
             return Ok(one(self.effect(t)?));
@@ -1142,7 +1160,12 @@ impl<'a> Builder<'a> {
                 return Ok(one(steps));
             }
             let chain = self.chain(target)?;
-            let region = &pv.regions.iter().find(|r| chain.contains(&r.id.as_str())).ok_or("Unknown region.")?.id;
+            let region = &pv
+                .regions
+                .iter()
+                .find(|r| chain.contains(&r.id.as_str()))
+                .ok_or_else(|| CodeGenError::new(&t.id, "Unknown region.".to_string()))?
+                .id;
             let mut steps = vec![self.exit_region_step(region)?];
             steps.extend(self.effect(t)?);
             let entered = self.enter_region(region, &[target])?;
@@ -1155,7 +1178,7 @@ impl<'a> Builder<'a> {
         Ok(seq(one(steps), entered))
     }
 
-    fn enter_domain(&mut self, domain: Option<&str>, targets: &[usize]) -> Result<Vec<Alt>, String> {
+    fn enter_domain(&mut self, domain: Option<&str>, targets: &[usize]) -> Result<Vec<Alt>, CodeGenError> {
         if let Some(domain) = domain {
             return self.enter_region(domain, targets);
         }
@@ -1174,7 +1197,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Enters `region` (currently inactive) so that every target gets entered; default entry when there is none.
-    fn enter_region(&mut self, region: &str, targets: &[usize]) -> Result<Vec<Alt>, String> {
+    fn enter_region(&mut self, region: &str, targets: &[usize]) -> Result<Vec<Alt>, CodeGenError> {
         if targets.is_empty() {
             return Ok(one(vec![self.enter_region_step(region)?]));
         }
@@ -1205,7 +1228,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Arriving at `v`, which sits directly in `region`: every way on from it goes through it.
-    fn reach(&mut self, v: usize, region: &str) -> Result<Vec<Alt>, String> {
+    fn reach(&mut self, v: usize, region: &str) -> Result<Vec<Alt>, CodeGenError> {
         let vx = self.ix.v(v);
         let machine_point =
             matches!(vx.vtype, VertexType::EntryPoint | VertexType::ExitPoint) && !self.ix.has_vertex(&vx.parent);
@@ -1214,10 +1237,10 @@ impl<'a> Builder<'a> {
         {
             return self.arrive(v, region);
         }
-        // Reaching a pseudostate again on its own way would never end.
+        // Reaching a pseudostate again on its own way would never end. Reported at that pseudostate.
         if let Some(cycle) = self.pseudostate_path.iter().position(|&x| self.ix.v(x).id == vx.id) {
             let kinds = cycle_kinds(self.pseudostate_path[cycle..].iter().map(|&x| self.ix.v(x).vtype));
-            return Err(format!("{kinds} form a cycle."));
+            return Err(CodeGenError::new(&vx.id, format!("{kinds} form a cycle.")));
         }
         self.pseudostate_path.push(v);
         let own = [self.via_of(v)];
@@ -1227,7 +1250,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The ways on from `v` (see reach()).
-    fn arrive(&mut self, v: usize, region: &str) -> Result<Vec<Alt>, String> {
+    fn arrive(&mut self, v: usize, region: &str) -> Result<Vec<Alt>, CodeGenError> {
         let vx = self.ix.v(v);
         let outs = self.ix.outgoing(&vx.id);
         match vx.vtype {
@@ -1342,7 +1365,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The transitions leaving a static pseudostate (junction, state exit point) as alternative ways.
-    fn branches(&mut self, v: usize, outs: &[&'a Transition]) -> Result<Vec<Alt>, String> {
+    fn branches(&mut self, v: usize, outs: &[&'a Transition]) -> Result<Vec<Alt>, CodeGenError> {
         if outs.is_empty() {
             return Ok(one(Vec::new()));
         }
@@ -1364,14 +1387,14 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    fn start_submachine(&self, state: usize, point: Option<String>) -> Result<Step, String> {
+    fn start_submachine(&self, state: usize, point: Option<String>) -> Result<Step, CodeGenError> {
         let r = self.state_ref(state)?;
         Ok(Step::StartSubmachine { state: r.name, state_index: r.index, point })
     }
 
     // -------------------------------------------------------------- submachines
 
-    fn submachine_models(&self) -> Result<Vec<(String, Rc<CodeModel>)>, String> {
+    fn submachine_models(&self) -> Result<Vec<(String, Rc<CodeModel>)>, CodeGenError> {
         let mut out: Vec<(String, Rc<CodeModel>)> = Vec::new();
         for &v in &self.state_list {
             let Some(href) = &self.ix.v(v).submachine else { continue };
@@ -1381,9 +1404,9 @@ impl<'a> Builder<'a> {
             match self.options.submachines.get(href) {
                 Some(sub) => out.push((href.clone(), sub.clone())),
                 None => {
-                    return Err(format!(
-                        "The state machine '{href}' used by {} was not provided.",
-                        self.label(Some(v))
+                    return Err(CodeGenError::new(
+                        &self.ix.v(v).id,
+                        format!("The state machine '{href}' used by {} was not provided.", self.label(Some(v))),
                     ));
                 }
             }
@@ -1391,7 +1414,7 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    fn point_name(&self, owner: usize, r: usize, kind: PointKind) -> Result<String, String> {
+    fn point_name(&self, owner: usize, r: usize, kind: PointKind) -> Result<String, CodeGenError> {
         let ov = self.ix.v(owner);
         let rv = self.ix.v(r);
         let sub = self.submachine(ov.submachine.as_deref());
@@ -1400,12 +1423,15 @@ impl<'a> Builder<'a> {
             PointKind::Exit => s.exit_points.iter().find(|p| p.id == rv.point_ref).map(|p| p.name.clone()),
         });
         found.ok_or_else(|| {
-            format!(
-                "{} references {} point '{}', which '{}' does not have.",
-                self.label(Some(owner)),
-                kind.as_str(),
-                rv.point_ref,
-                ov.submachine.as_deref().unwrap_or("undefined")
+            CodeGenError::new(
+                &rv.id,
+                format!(
+                    "{} references {} point '{}', which '{}' does not have.",
+                    self.label(Some(owner)),
+                    kind.as_str(),
+                    rv.point_ref,
+                    ov.submachine.as_deref().unwrap_or("undefined")
+                ),
             )
         })
     }
@@ -1421,7 +1447,7 @@ impl<'a> Builder<'a> {
         prefix: Vec<Step>,
         kind: &'static str,
         label: &str,
-    ) -> Result<Vec<Fireable>, String> {
+    ) -> Result<Vec<Fireable>, CodeGenError> {
         if let Some(cached) = self.fire_cache.get(&key) {
             return Ok(cached.clone());
         }
@@ -1429,7 +1455,7 @@ impl<'a> Builder<'a> {
         let segment = self.segment(pos, t)?;
         let mut alts = seq(one(prefix), segment);
         let post = if self.model.kind == MachineKind::Protocol {
-            self.condition(&t.postcondition, &format!("Postcondition of {label}"))?
+            self.condition(&t.postcondition, &format!("Postcondition of {label}"), &t.id)?
         } else {
             None
         };
@@ -1470,13 +1496,15 @@ impl<'a> Builder<'a> {
         Ok(list)
     }
 
-    fn owner_state_of(&self, pos: usize) -> Result<Ref, String> {
+    fn owner_state_of(&self, pos: usize) -> Result<Ref, CodeGenError> {
         if self.is_state(pos) {
             return self.state_ref(pos);
         }
         match self.ix.owner_state(pos) {
             Some(owner) => self.state_ref(owner),
-            None => Err(format!("{} has no owning state.", self.label(Some(pos)))),
+            None => {
+                Err(CodeGenError::new(&self.ix.v(pos).id, format!("{} has no owning state.", self.label(Some(pos)))))
+            }
         }
     }
 
@@ -1486,11 +1514,11 @@ impl<'a> Builder<'a> {
         pos: usize,
         prefix: Vec<Step>,
         kind: Option<&'static str>,
-    ) -> Result<Vec<CodeCandidate>, String> {
+    ) -> Result<Vec<CodeCandidate>, CodeGenError> {
         let label = self.transition_label(t);
         let guard = self.guard_of(t)?;
         let pre = if self.model.kind == MachineKind::Protocol {
-            self.condition(&t.precondition, &format!("Precondition of {label}"))?
+            self.condition(&t.precondition, &format!("Precondition of {label}"), &t.id)?
         } else {
             None
         };
@@ -1518,7 +1546,7 @@ impl<'a> Builder<'a> {
     }
 
     /// A join: fires from the completion of any source once all sources have completed.
-    fn join(&mut self, j: usize) -> Result<Vec<CodeCandidate>, String> {
+    fn join(&mut self, j: usize) -> Result<Vec<CodeCandidate>, CodeGenError> {
         self.features.joins = true;
         let jv = self.ix.v(j);
         let incoming = self.ix.incoming(&jv.id);
@@ -1583,7 +1611,10 @@ impl<'a> Builder<'a> {
                 };
                 let alts = seq(one(steps), entered);
                 let via = join_via(&[self.via_of(j)], &union_via(alts.iter().map(|a| &a.via)));
-                let source = requires.first().cloned().ok_or_else(|| format!("{label} has no source state."))?;
+                let source = requires
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CodeGenError::new(&jv.id, format!("{label} has no source state.")))?;
                 let name = self.transition_names.take(&ident(&format!("join_{}", names.join("_")), "x"));
                 let steps = self.alts_to_steps(alts, &label, domain.unwrap_or(self.top_region_ids[0]))?;
                 let index = self.transitions.len();
@@ -1614,7 +1645,7 @@ impl<'a> Builder<'a> {
 
     // -------------------------------------------------------------- states and regions
 
-    fn state(&mut self, v: usize, index: usize) -> Result<CodeState, String> {
+    fn state(&mut self, v: usize, index: usize) -> Result<CodeState, CodeGenError> {
         let vx = self.ix.v(v);
         let name = self.state_names[index].clone();
         let is_final = vx.vtype == VertexType::Final;
@@ -1623,13 +1654,13 @@ impl<'a> Builder<'a> {
         let activities = if is_final {
             Vec::new()
         } else {
-            self.calls(&vx.do_activity, &format!("do of {name}"), SetKind::Activities)?
+            self.calls(&vx.do_activity, &format!("do of {name}"), &vx.id, SetKind::Activities)?
         };
         let timer_steps: Vec<CodeTimer> = self.timers.iter().filter(|t| t.state_index == index).cloned().collect();
         let timers = timer_steps.iter().map(|t| Ref { name: t.name.clone(), index: t.index }).collect();
 
         let mut entry: Vec<Step> = self
-            .calls(&vx.entry, &format!("entry of {name}"), SetKind::Actions)?
+            .calls(&vx.entry, &format!("entry of {name}"), &vx.id, SetKind::Actions)?
             .into_iter()
             .map(|action| Step::Call { action })
             .collect();
@@ -1646,7 +1677,7 @@ impl<'a> Builder<'a> {
         exit.extend(timer_steps.iter().map(|t| Step::CancelTimer { timer: t.name.clone(), timer_index: t.index }));
         exit.extend(activities.iter().rev().map(|a| Step::StopActivity { activity: a.clone() }));
         exit.extend(
-            self.calls(&vx.exit, &format!("exit of {name}"), SetKind::Actions)?
+            self.calls(&vx.exit, &format!("exit of {name}"), &vx.id, SetKind::Actions)?
                 .into_iter()
                 .map(|action| Step::Call { action }),
         );
@@ -1662,7 +1693,8 @@ impl<'a> Builder<'a> {
         if !deferred.is_empty() {
             self.features.deferral = true;
         }
-        let invariant = if is_final { None } else { self.condition(&vx.invariant, &format!("Invariant of {name}"))? };
+        let invariant =
+            if is_final { None } else { self.condition(&vx.invariant, &format!("Invariant of {name}"), &vx.id)? };
         if invariant.is_some() {
             self.features.invariants = true;
         }
@@ -1782,7 +1814,7 @@ impl<'a> Builder<'a> {
         })
     }
 
-    fn region(&mut self, index: usize) -> Result<CodeRegion, String> {
+    fn region(&mut self, index: usize) -> Result<CodeRegion, CodeGenError> {
         let (id, name_attr, owner) = {
             let r = &self.region_list[index];
             (r.id, r.name, r.owner)
@@ -1826,7 +1858,7 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    fn entry_point(&mut self, v: usize) -> Result<CodeEntryPoint, String> {
+    fn entry_point(&mut self, v: usize) -> Result<CodeEntryPoint, CodeGenError> {
         let vx = self.ix.v(v);
         let outs = self.ix.outgoing(&vx.id);
         let mut alts = one(Vec::new());

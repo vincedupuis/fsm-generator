@@ -119,6 +119,17 @@ impl Loader {
         Ok(())
     }
 
+    /// Stops the generation on the errors in the machines.
+    fn failed(&mut self) -> GenerateError {
+        let errors = self.issues.iter().filter(|i| i.severity == Severity::Error).count();
+        let message = format!(
+            "{errors} error{} in the state machine{}; nothing was generated.",
+            plural(errors),
+            plural(self.loaded.len())
+        );
+        GenerateError::Failed { message, issues: std::mem::take(&mut self.issues) }
+    }
+
     /// The code model of a loaded machine, its submachines' first.
     fn code_of(&mut self, path: &Path) -> Result<Rc<CodeModel>, GenerateError> {
         let l = &self.loaded[path];
@@ -137,9 +148,19 @@ impl Loader {
             submachines.insert(href, self.code_of(&sub)?);
         }
         let options = Options { submachines, source_file: display(path) };
-        let code = to_code_model(&self.loaded[path].model, &options)
-            .map_err(|e| GenerateError::new(format!("{}: {e}", display(path))))?;
-        let code = Rc::new(code);
+        let code = match to_code_model(&self.loaded[path].model, &options) {
+            Ok(code) => Rc::new(code),
+            Err(e) => {
+                // Reported at the element it is about, as a validation error would be.
+                self.issues.push(FileIssue {
+                    file: display(path),
+                    id: e.id,
+                    severity: Severity::Error,
+                    message: e.message,
+                });
+                return Err(self.failed());
+            }
+        };
         self.loaded.get_mut(path).unwrap().code = Some(code.clone());
         self.building.remove(path);
         Ok(code)
@@ -156,14 +177,8 @@ pub fn generate(sources: &[PathBuf], renderer: &Renderer) -> Result<GenerateResu
     for s in sources {
         loader.load(s, None)?;
     }
-    let errors = loader.issues.iter().filter(|i| i.severity == Severity::Error).count();
-    if errors > 0 {
-        let message = format!(
-            "{errors} error{} in the state machine{}; nothing was generated.",
-            plural(errors),
-            plural(loader.loaded.len())
-        );
-        return Err(GenerateError::Failed { message, issues: loader.issues });
+    if loader.issues.iter().any(|i| i.severity == Severity::Error) {
+        return Err(loader.failed());
     }
 
     let mut files: Vec<OutputFile> = Vec::new();

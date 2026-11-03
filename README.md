@@ -40,7 +40,7 @@ fsm-generator "models/**/*.fsm" -t sml -o src/generated
 - The machines are validated first. Nothing is generated when they have errors, and warnings are reported.
 - Machines used by submachine states are read and validated too, but only the given files are generated. Generate the submachines' files as well, e.g. with `"models/*.fsm"`.
 - Quote glob patterns (`*`, `?`, `[...]`, `**`): the program expands them itself, the same in bash, zsh, PowerShell and cmd.
-- Problems, including the warnings and errors a template reports, are printed to stderr as `file:line: severity: message`, which editors' problem matchers and CI logs understand.
+- Problems, including the errors found while building the code model (such as pseudostates forming a cycle) and the warnings and errors a template reports, are printed to stderr as `file:line: severity: message`, which editors' problem matchers and CI logs understand.
 - Exit codes: `0` success, `1` errors in the machines or the template, `2` bad usage.
 - Generated files are always overwritten.
 

@@ -324,6 +324,10 @@ struct Lowering<'a> {
     route_findings: HashMap<usize, Vec<Finding>>,
     /// The routes being lowered: the key of the origin they are lowered for, and what they found so far.
     routing: Vec<(String, Vec<Finding>)>,
+    /// While a region's default entry is lowered for an origin that enters the region after calls (an entry point's
+    /// effects): the number of routes being lowered outside it. What lowering it finds is the default entry's, noted on
+    /// the region's initial transition, not on the origin nor kept by those routes.
+    in_default: Option<usize>,
     choice_count: usize,
     seq: usize,
     postconditions: Vec<TablePostcondition>,
@@ -416,6 +420,7 @@ impl<'a> Lowering<'a> {
             route_count: 2,
             route_findings: HashMap::new(),
             routing: Vec::new(),
+            in_default: None,
             choice_count: 0,
             seq: 0,
             postconditions: Vec::new(),
@@ -780,7 +785,7 @@ impl<'a> Lowering<'a> {
             Some(way) => way.iter().filter(|v| origin.via.iter().any(|x| x.id == v.id)).collect(),
         };
         let explained = |kinds: &[&str]| way.iter().any(|v| kinds.contains(&v.kind));
-        {
+        if self.in_default.is_none() {
             let mut found = origin.found.borrow_mut();
             if let Some(left) = &f.left
                 && !explained(&["exitPoint", "join"])
@@ -795,7 +800,8 @@ impl<'a> Lowering<'a> {
             }
         }
         // For a route, the way of a branch of its origin's choices is that branch's.
-        for (key, findings) in &mut self.routing {
+        let from = self.in_default.unwrap_or(0);
+        for (key, findings) in self.routing.iter_mut().skip(from) {
             let way = if f.way.is_none() && *key != origin.key { origin.branch_way.clone() } else { f.way.clone() };
             findings.push(Finding { way, ..f.clone() });
         }
@@ -1239,7 +1245,9 @@ impl<'a> Lowering<'a> {
                 if !pre.is_empty() {
                     let mut route_steps = pre;
                     route_steps.extend(cm.regions[r].default_steps.iter().cloned());
+                    let was = self.in_default.replace(self.routing.len());
                     let route = self.route(r, &route_steps, origin);
+                    self.in_default = was;
                     actions.push(TableAction::Route { region: r, route, history: 0 });
                 }
                 continue;

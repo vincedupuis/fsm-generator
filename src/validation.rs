@@ -518,9 +518,111 @@ pub fn validate(model: &FsmModel, submachines: &HashMap<String, SubmachineInfo>)
         }
     }
 
+    check_pseudostate_cycles(&mut c);
     check_text(&mut c);
     check_reachability(&mut c);
     c.issues
+}
+
+/// Pseudostates that transitions go through in a cycle: a compound transition taking the cycle would never reach a
+/// state, and the code generator can't express it. One error per group of pseudostates linked by cycles, on its first
+/// vertex, naming the shortest cycle through it.
+fn check_pseudostate_cycles(c: &mut Checker) {
+    let model = c.model;
+    let ix = &c.ix;
+    // The pseudostates a compound transition goes on from (the machine's own entry and exit points end it).
+    let passes = |v: usize| {
+        let v = ix.v(v);
+        match v.vtype {
+            VertexType::Junction
+            | VertexType::Choice
+            | VertexType::ShallowHistory
+            | VertexType::DeepHistory
+            | VertexType::Fork => true,
+            VertexType::EntryPoint | VertexType::ExitPoint => ix.has_vertex(&v.parent),
+            _ => false,
+        }
+    };
+    let next = |v: usize| -> Vec<usize> {
+        ix.outgoing(&ix.v(v).id)
+            .iter()
+            .filter(|t| t.kind != TransitionKind::Internal)
+            .filter_map(|t| ix.vertex(&t.target))
+            .filter(|&w| passes(w))
+            .collect()
+    };
+    let previous = |v: usize| -> Vec<usize> {
+        ix.incoming(&ix.v(v).id)
+            .iter()
+            .filter(|t| t.kind != TransitionKind::Internal)
+            .filter_map(|t| ix.vertex(&t.source))
+            .filter(|&w| passes(w))
+            .collect()
+    };
+    // `start` and every vertex reached from it through `step`, breadth first, with the vertex each was reached from.
+    let walk = |start: usize, step: &dyn Fn(usize) -> Vec<usize>| {
+        let mut from: HashMap<usize, Option<usize>> = HashMap::from([(start, None)]);
+        let mut queue = vec![start];
+        let mut i = 0;
+        while i < queue.len() {
+            for w in step(queue[i]) {
+                if let std::collections::hash_map::Entry::Vacant(e) = from.entry(w) {
+                    e.insert(Some(queue[i]));
+                    queue.push(w);
+                }
+            }
+            i += 1;
+        }
+        (queue, from)
+    };
+    let mut done: HashSet<usize> = HashSet::new();
+    let mut found: Vec<(usize, Vec<usize>)> = Vec::new();
+    for v in 0..model.vertices.len() {
+        // A vertex whose id is used again later is not the one transitions refer to.
+        if !passes(v) || ix.vertex(&model.vertices[v].id) != Some(v) || done.contains(&v) {
+            continue;
+        }
+        let (order, from) = walk(v, &next);
+        // The shortest cycle through v ends with the first vertex reached that has a transition back to v.
+        let Some(last) = order.iter().copied().find(|&u| next(u).contains(&v)) else { continue };
+        let (_, backward) = walk(v, &previous);
+        done.extend(order.iter().copied().filter(|u| backward.contains_key(u)));
+        let mut cycle = vec![v];
+        let mut u = Some(last);
+        while let Some(x) = u.filter(|&x| x != v) {
+            cycle.insert(1, x);
+            u = from[&x];
+        }
+        cycle.push(v);
+        found.push((v, cycle));
+    }
+    for (v, cycle) in found {
+        let path: Vec<String> = cycle.iter().map(|&x| c.name(Some(x))).collect();
+        let types: Vec<VertexType> = cycle.iter().map(|&x| model.vertices[x].vtype).collect();
+        let msg = format!("{} form a cycle without a state: {}.", cycle_kinds(&types), path.join(" -> "));
+        c.add(&model.vertices[v].id, Severity::Error, msg);
+    }
+}
+
+/// The kinds of pseudostates in `cycle`: `Junctions`, `Junctions and choices`, ... (as in the code generator's error).
+fn cycle_kinds(cycle: &[VertexType]) -> String {
+    use VertexType::*;
+    let kinds: [(&str, &[VertexType]); 6] = [
+        ("junctions", &[Junction]),
+        ("choices", &[Choice]),
+        ("history pseudostates", &[ShallowHistory, DeepHistory]),
+        ("entry points", &[EntryPoint]),
+        ("exit points", &[ExitPoint]),
+        ("forks", &[Fork]),
+    ];
+    let found: Vec<&str> =
+        kinds.iter().filter(|(_, types)| cycle.iter().any(|t| types.contains(t))).map(|(kind, _)| *kind).collect();
+    let text = match found.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => found.first().copied().unwrap_or_default().to_string(),
+    };
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |f| f.to_uppercase().collect::<String>() + chars.as_str())
 }
 
 fn distinct(items: &[Option<&str>]) -> usize {
@@ -629,5 +731,122 @@ fn check_reachability(c: &mut Checker) {
             let msg = format!("State {} can never be entered.", c.name(Some(vi)));
             c.add(&v.id, Severity::Warning, msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Region, Transition, Vertex};
+
+    /// A machine with states A and B, A entered first, and `vertices` (id, type, name, parent).
+    fn machine(vertices: &[(&str, VertexType, &str, &str)]) -> FsmModel {
+        let mut m = FsmModel {
+            id: "sm".into(),
+            name: "M".into(),
+            kind: MachineKind::Behavioral,
+            context: String::new(),
+            documentation: String::new(),
+            regions: vec![Region { id: "r".into(), name: String::new() }],
+            vertices: vec![
+                Vertex::new("A", VertexType::State, "A", "r"),
+                Vertex::new("B", VertexType::State, "B", "r"),
+                Vertex::new("i", VertexType::Initial, "", "r"),
+            ],
+            transitions: Vec::new(),
+        };
+        m.vertices.extend(vertices.iter().map(|&(id, t, name, parent)| Vertex::new(id, t, name, parent)));
+        transition(&mut m, "i", "A", "");
+        m
+    }
+
+    fn transition(m: &mut FsmModel, source: &str, target: &str, guard: &str) {
+        m.transitions.push(Transition {
+            id: format!("t{}", m.transitions.len()),
+            source: source.into(),
+            target: target.into(),
+            kind: TransitionKind::External,
+            triggers: if source == "A" { vec!["e".into()] } else { Vec::new() },
+            guard: guard.into(),
+            effect: String::new(),
+            precondition: String::new(),
+            postcondition: String::new(),
+        });
+    }
+
+    fn cycles(m: &FsmModel) -> Vec<(String, &'static str, String)> {
+        validate(m, &HashMap::new())
+            .into_iter()
+            .filter(|i| i.message.contains("form a cycle"))
+            .map(|i| (i.id, i.severity.as_str(), i.message))
+            .collect()
+    }
+
+    #[test]
+    fn choices_leading_to_each_other() {
+        let mut m = machine(&[("c1", VertexType::Choice, "c1", "r"), ("c2", VertexType::Choice, "c2", "r")]);
+        transition(&mut m, "A", "c1", "");
+        transition(&mut m, "c1", "c2", "g()");
+        transition(&mut m, "c1", "B", "else");
+        transition(&mut m, "c2", "c1", "h()");
+        transition(&mut m, "c2", "B", "else");
+        let msg = "Choices form a cycle without a state: 'c1' -> 'c2' -> 'c1'.";
+        assert_eq!(cycles(&m), vec![("c1".into(), "error", msg.into())]);
+    }
+
+    #[test]
+    fn choice_targeting_itself() {
+        let mut m = machine(&[("c", VertexType::Choice, "c", "r")]);
+        transition(&mut m, "A", "c", "");
+        transition(&mut m, "c", "c", "g()");
+        transition(&mut m, "c", "B", "else");
+        let msg = "Choices form a cycle without a state: 'c' -> 'c'.";
+        assert_eq!(cycles(&m), vec![("c".into(), "error", msg.into())]);
+    }
+
+    #[test]
+    fn unnamed_junction_and_choice() {
+        let mut m = machine(&[("c", VertexType::Choice, "", "r"), ("j", VertexType::Junction, "", "r")]);
+        transition(&mut m, "A", "j", "");
+        transition(&mut m, "j", "c", "");
+        transition(&mut m, "c", "j", "g()");
+        transition(&mut m, "c", "B", "else");
+        let msg = "Junctions and choices form a cycle without a state: choice -> junction -> choice.";
+        assert_eq!(cycles(&m), vec![("c".into(), "error", msg.into())]);
+    }
+
+    #[test]
+    fn one_issue_for_cycles_sharing_pseudostates() {
+        let mut m = machine(&[
+            ("j1", VertexType::Junction, "j1", "r"),
+            ("j2", VertexType::Junction, "j2", "r"),
+            ("j3", VertexType::Junction, "j3", "r"),
+            ("j4", VertexType::Junction, "j4", "r"),
+        ]);
+        transition(&mut m, "A", "j1", "");
+        transition(&mut m, "j1", "j2", "a()");
+        transition(&mut m, "j1", "j3", "b()");
+        transition(&mut m, "j1", "B", "else");
+        transition(&mut m, "j2", "j4", "");
+        transition(&mut m, "j4", "j1", "");
+        transition(&mut m, "j3", "j1", "");
+        let msg = "Junctions form a cycle without a state: 'j1' -> 'j3' -> 'j1'.";
+        assert_eq!(cycles(&m), vec![("j1".into(), "error", msg.into())]);
+    }
+
+    #[test]
+    fn loops_through_states_and_machine_entry_points() {
+        let mut m = machine(&[
+            ("c", VertexType::Choice, "c", "r"),
+            ("ep", VertexType::EntryPoint, "ep", "r"),
+            ("j", VertexType::Junction, "j", "r"),
+        ]);
+        transition(&mut m, "A", "c", "");
+        transition(&mut m, "c", "A", "g()");
+        transition(&mut m, "c", "B", "else");
+        transition(&mut m, "ep", "j", "");
+        transition(&mut m, "j", "ep", "g()");
+        transition(&mut m, "j", "B", "else");
+        assert!(cycles(&m).is_empty());
     }
 }
