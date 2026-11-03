@@ -448,6 +448,27 @@ fn not(c: Condition) -> Condition {
     }
 }
 
+/// The kinds of pseudostates in a cycle, for its error: `Junctions`, `Junctions and choices`, ...
+fn cycle_kinds(cycle: impl Iterator<Item = VertexType> + Clone) -> String {
+    let kinds: [(&str, &[VertexType]); 6] = [
+        ("junctions", &[VertexType::Junction]),
+        ("choices", &[VertexType::Choice]),
+        ("history pseudostates", &[VertexType::ShallowHistory, VertexType::DeepHistory]),
+        ("entry points", &[VertexType::EntryPoint]),
+        ("exit points", &[VertexType::ExitPoint]),
+        ("forks", &[VertexType::Fork]),
+    ];
+    let found: Vec<&str> =
+        kinds.iter().filter(|(_, types)| cycle.clone().any(|t| types.contains(&t))).map(|(name, _)| *name).collect();
+    let text = match found.split_last() {
+        None => "pseudostates".to_string(),
+        Some((last, [])) => last.to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    };
+    let mut chars = text.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 /// Every combination of a way through `a` followed by a way through `b`.
 fn seq(a: Vec<Alt>, b: Vec<Alt>) -> Vec<Alt> {
     let mut out = Vec::new();
@@ -592,8 +613,8 @@ struct Builder<'a> {
     transition_names: Names,
     fire_cache: HashMap<String, Vec<Fireable>>,
     features: CodeFeatures,
-    /// Junctions on the way being compiled, to report cycles.
-    junction_path: Vec<String>,
+    /// Pseudostates on the way being compiled, to report cycles.
+    pseudostate_path: Vec<usize>,
 }
 
 impl<'a> Builder<'a> {
@@ -620,7 +641,7 @@ impl<'a> Builder<'a> {
             transition_names: Names::default(),
             fire_cache: HashMap::new(),
             features: CodeFeatures::default(),
-            junction_path: Vec::new(),
+            pseudostate_path: Vec::new(),
         }
     }
 
@@ -1185,17 +1206,24 @@ impl<'a> Builder<'a> {
 
     /// Arriving at `v`, which sits directly in `region`: every way on from it goes through it.
     fn reach(&mut self, v: usize, region: &str) -> Result<Vec<Alt>, String> {
-        let alts = self.arrive(v, region)?;
         let vx = self.ix.v(v);
         let machine_point =
             matches!(vx.vtype, VertexType::EntryPoint | VertexType::ExitPoint) && !self.ix.has_vertex(&vx.parent);
         if matches!(vx.vtype, VertexType::State | VertexType::Final | VertexType::Initial | VertexType::Terminate)
             || machine_point
         {
-            return Ok(alts);
+            return self.arrive(v, region);
         }
+        // Reaching a pseudostate again on its own way would never end.
+        if let Some(cycle) = self.pseudostate_path.iter().position(|&x| self.ix.v(x).id == vx.id) {
+            let kinds = cycle_kinds(self.pseudostate_path[cycle..].iter().map(|&x| self.ix.v(x).vtype));
+            return Err(format!("{kinds} form a cycle."));
+        }
+        self.pseudostate_path.push(v);
         let own = [self.via_of(v)];
-        Ok(alts.into_iter().map(|a| Alt { via: join_via(&own, &a.via), ..a }).collect())
+        let alts = self.arrive(v, region);
+        self.pseudostate_path.pop();
+        Ok(alts?.into_iter().map(|a| Alt { via: join_via(&own, &a.via), ..a }).collect())
     }
 
     /// The ways on from `v` (see reach()).
@@ -1269,15 +1297,7 @@ impl<'a> Builder<'a> {
                 let via = union_via(branches.iter().map(|b| &b.via));
                 Ok(vec![Alt { guard: None, steps: vec![choice(label, branches, r)], via }])
             }
-            VertexType::Junction => {
-                if self.junction_path.contains(&vx.id) {
-                    return Err("Junctions form a cycle.".to_string());
-                }
-                self.junction_path.push(vx.id.clone());
-                let result = self.branches(v, &outs);
-                self.junction_path.pop();
-                result
-            }
+            VertexType::Junction => self.branches(v, &outs),
             VertexType::ShallowHistory | VertexType::DeepHistory => {
                 self.features.history = true;
                 let r = self.region_ref(region)?;
