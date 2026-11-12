@@ -330,6 +330,7 @@ pub enum Step {
     ExitMachine { point: String },
     Terminate,
     Check { constraint: &'static str, element: String, condition: Condition },
+    Transition { id: String, label: String },
 }
 
 impl Step {
@@ -351,6 +352,7 @@ impl Step {
             Step::ExitMachine { .. } => "exitMachine",
             Step::Terminate => "terminate",
             Step::Check { .. } => "check",
+            Step::Transition { .. } => "transition",
         }
     }
 }
@@ -1001,13 +1003,14 @@ impl<'a> Builder<'a> {
         self.condition(&t.guard, &what, &t.id)
     }
 
+    /// Taking the transition (one segment of a compound transition): its `transition` step, for tracing, then its
+    /// effect.
     fn effect(&mut self, t: &Transition) -> Result<Vec<Step>, CodeGenError> {
         let label = self.transition_label(t);
-        Ok(self
-            .calls(&t.effect, &format!("Effect of {label}"), &t.id, SetKind::Actions)?
-            .into_iter()
-            .map(|action| Step::Call { action })
-            .collect())
+        let calls = self.calls(&t.effect, &format!("Effect of {label}"), &t.id, SetKind::Actions)?;
+        let mut steps = vec![Step::Transition { id: t.id.clone(), label }];
+        steps.extend(calls.into_iter().map(|action| Step::Call { action }));
+        Ok(steps)
     }
 
     fn transition_label(&self, t: &Transition) -> String {

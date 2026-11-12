@@ -197,6 +197,11 @@ pub enum TableAction {
     Call {
         action: String,
     },
+    /// Taking the transition `id` (one segment of a compound transition), for tracing.
+    Transition {
+        id: String,
+        label: String,
+    },
     Postcondition {
         index: usize,
     },
@@ -401,6 +406,28 @@ fn ident(text: &str) -> String {
 fn dedupe(notes: Vec<TableNote>) -> Vec<TableNote> {
     let mut seen = HashSet::new();
     notes.into_iter().filter(|n| seen.insert(format!("{}|{}|{}|{}", n.kind, n.id, n.element, n.detail))).collect()
+}
+
+/// Steps done in place, as table actions: behavior calls, and the transitions taken (for tracing).
+fn is_call(st: &Step) -> bool {
+    matches!(st, Step::Call { .. } | Step::Transition { .. })
+}
+
+/// `steps` as JSON without their `transition` steps, to compare what they do.
+fn untraced(steps: &[Step]) -> String {
+    fn strip(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Array(list) => {
+                list.retain(|x| x.get("kind").and_then(|k| k.as_str()) != Some("transition"));
+                list.iter_mut().for_each(strip);
+            }
+            serde_json::Value::Object(map) => map.values_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(steps).unwrap_or_default();
+    strip(&mut v);
+    v.to_string()
 }
 
 fn steps_json(steps: &[Step]) -> String {
@@ -959,7 +986,7 @@ impl<'a> Lowering<'a> {
             self.problems.push(note("topRegions", &origin.id, &origin.label, "", ""));
             return;
         }
-        while i < steps.len() && matches!(steps[i], Step::Exit { .. } | Step::Call { .. }) {
+        while i < steps.len() && (matches!(steps[i], Step::Exit { .. }) || is_call(&steps[i])) {
             let st = &steps[i];
             i += 1;
             if let Step::Exit { state, state_index } = st {
@@ -1101,8 +1128,8 @@ impl<'a> Lowering<'a> {
         while i < steps.len() {
             let st = &steps[i];
             match st {
-                Step::Call { action } => {
-                    actions.push(TableAction::Call { action: action.clone() });
+                Step::Call { .. } | Step::Transition { .. } => {
+                    actions.extend(call_actions(std::slice::from_ref(st)));
                     i += 1;
                 }
                 Step::Enter { state_index, .. } => {
@@ -1210,7 +1237,7 @@ impl<'a> Lowering<'a> {
         let mut first = true;
         while i < steps.len() {
             let st = &steps[i];
-            if matches!(st, Step::Call { .. }) && first && !regions.is_empty() {
+            if is_call(st) && first && !regions.is_empty() {
                 prefix.push(st.clone());
                 i += 1;
                 continue;
@@ -1252,8 +1279,9 @@ impl<'a> Lowering<'a> {
                 }
                 continue;
             }
-            // The region's own default entry needs no route.
-            if pre.is_empty() && region_steps == cm.regions[r].default_steps.as_slice() {
+            // The region's own default entry needs no route. Its transitions aside: tracing them differently is no
+            // reason for a route.
+            if pre.is_empty() && untraced(region_steps) == untraced(&cm.regions[r].default_steps) {
                 continue;
             }
             if let Some(state) = state {
@@ -1289,7 +1317,7 @@ impl<'a> Lowering<'a> {
         let mut first = true;
         while i < steps.len() {
             let st = &steps[i];
-            if matches!(st, Step::Call { .. }) && first && !regions.is_empty() {
+            if is_call(st) && first && !regions.is_empty() {
                 i += 1;
                 continue;
             }
@@ -1434,6 +1462,7 @@ fn call_actions(steps: &[Step]) -> Vec<TableAction> {
         .iter()
         .filter_map(|s| match s {
             Step::Call { action } => Some(TableAction::Call { action: action.clone() }),
+            Step::Transition { id, label } => Some(TableAction::Transition { id: id.clone(), label: label.clone() }),
             _ => None,
         })
         .collect()

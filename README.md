@@ -51,7 +51,7 @@ fsm-generator "models/**/*.fsm" -t sml -o src/generated
 | `ts` | TypeScript without dependencies: `OrderActions.ts` (events, states, the `OrderActions` interface to implement) and `Order.ts` (the `Order` class). |
 | `sml` | C++17 for [Boost.SML](https://github.com/boost-ext/sml): `OrderEvents.h`, `OrderActions.h`, `Order.h`, `Order.cpp`, and `FsmTimers.h` shared by the machines with time events. |
 
-Both implement UML run-to-completion semantics: an event queue, completion events, deferred events, timers through an injectable clock, do activities as start/stop hooks plus `activityDone()`, constraint checks reported to `onConstraintViolation`, one class per submachine, and `onTerminate` for terminate pseudostates. FSM Editor's [CODEGEN.md](https://github.com/vincedupuis/fsm-editor-vscode/blob/main/docs/CODEGEN.md) describes how to use the generated code and what the Boost.SML template works around.
+Both implement UML run-to-completion semantics: an event queue, completion events, deferred events, timers through an injectable clock, do activities as start/stop hooks plus `activityDone()`, constraint checks reported to `onConstraintViolation`, one class per submachine, `onTerminate` for terminate pseudostates, and an `onTrace` hook reporting events, states entered and left, and transitions taken. FSM Editor's [CODEGEN.md](https://github.com/vincedupuis/fsm-editor-vscode/blob/main/docs/CODEGEN.md) describes how to use the generated code and what the Boost.SML template works around.
 
 ## Writing a template
 

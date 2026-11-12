@@ -72,6 +72,8 @@ this.exitMachine({{ s.point | quote }});
 this.terminate();
 {% elif s.kind == "check" %}
 if (!({{ s.condition | guard }})) this.actions.onConstraintViolation('{{ s.constraint }}', {{ s.element | quote }});
+{% elif s.kind == "transition" %}
+this.trace('transition', {{ s.id | quote }}, {{ s.label | quote }});
 {% endif %}
 {% endfor %}
 {% endmacro %}
@@ -133,6 +135,9 @@ export type {{ machine.name }}EntryPoint = {{ entryPoints | map(attribute="name"
 /** Exit points, reported to onExitPoint. */
 export type {{ machine.name }}ExitPoint = {{ exitPoints | map(attribute="name") | map("quote") | join(" | ") or "never" }};
 
+/** What onTrace reports: an event processed, a state entered or left, a transition taken. */
+export type {{ machine.name }}TraceKind = 'event' | 'enter' | 'exit' | 'transition';
+
 /**
  * What {{ machine.displayName }} calls: implement it to give the machine its behavior.
 {% if machine.documentation %}
@@ -183,6 +188,13 @@ export interface {{ machine.name }}Options {
   onFinished?(): void;
   /** The machine left through one of its exit points. */
   onExitPoint?(point: {{ machine.name }}ExitPoint): void;
+  /**
+   * Tracing, e.g. to a log for FSM Editor's Trace Player: called for each event processed, state entered or left, and
+   * transition taken (each segment of a compound transition, so the branches taken at choices and junctions too).
+   * `machine` is the machine's name, followed for a submachine by the submachine states leading to it
+   * (`{{ machine.name }}.State`); `id` is the xmi:id of the state or transition (the name of an event), and `name` its name.
+   */
+  onTrace?(machine: string, kind: {{ machine.name }}TraceKind, id: string, name: string): void;
 }
 {% endfilter %}
 {#- ================================================================ Order.ts #}
@@ -198,6 +210,7 @@ import type {
   {{ machine.name }}ExitPoint,
   {{ machine.name }}Options,
   {{ machine.name }}State,
+  {{ machine.name }}TraceKind,
 } from './{{ machine.name }}Actions';
 {% for sub in submachines %}
 import { {{ sub.name }} } from './{{ sub.name }}';
@@ -212,6 +225,7 @@ export type {
   {{ machine.name }}ExitPoint,
   {{ machine.name }}Options,
   {{ machine.name }}State,
+  {{ machine.name }}TraceKind,
 };
 
 const NONE = 0;
@@ -221,6 +235,8 @@ const COMPLETION = 0;
 const EXIT_POINT = 1;
 
 const STATE_NAMES: readonly {{ machine.name }}State[] = [{{ states | map(attribute="name") | map("quote") | join(", ") }}];
+/** xmi:id of each state, for tracing. */
+const STATE_IDS: readonly string[] = [{{ states | map(attribute="id") | map("quote") | join(", ") }}];
 /** Region containing each state. */
 const REGION_OF: readonly number[] = [{{ states | map(attribute="regionIndex") | join(", ") }}];
 /** Regions of each state. */
@@ -298,6 +314,7 @@ export class {{ machine.name }} {
       clock: options.clock,
       onFinished: () => this.post(COMPLETION, {{ s.index }}, ''),
       onExitPoint: (point: string) => this.post(EXIT_POINT, {{ s.index }}, point),
+      onTrace: (machine, kind, id, name) => this.options.onTrace?.(`{{ machine.name }}.{{ s.name }}${machine.includes('.') ? machine.slice(machine.indexOf('.')) : ''}`, kind, id, name),
     });
 {% endfor %}
   }
@@ -445,6 +462,7 @@ export class {{ machine.name }} {
 
   /** One run-to-completion step: selects the enabled transitions, then fires them. */
   private process(signal: number): number {
+    this.trace('event', SIGNAL_NAMES[signal], SIGNAL_NAMES[signal]);
 {% if features.preconditions %}
     this.preconditionFailed = '';
 {% endif %}
@@ -567,6 +585,7 @@ export class {{ machine.name }} {
   private enter(s: number): void {
     this.active[REGION_OF[s]] = s;
     this.completed[s] = false;
+    this.trace('enter', STATE_IDS[s], STATE_NAMES[s]);
 {% if features.activities %}
     if (COMPLETES[s] === 'activities') this.pending[s] = STATE_ACTIVITIES[s].length;
 {% endif %}
@@ -596,6 +615,7 @@ export class {{ machine.name }} {
     this.active[region] = -1;
     this.history[region] = IS_FINAL[s] ? -1 : s;
     this.completed[s] = false;
+    this.trace('exit', STATE_IDS[s], STATE_NAMES[s]);
   }
 
   private exitRegion(region: number): void {
@@ -674,6 +694,10 @@ export class {{ machine.name }} {
     throw new Error(`{{ machine.name }}: no branch of the ${choice} can be taken.`);
   }
 {% endif %}
+
+  private trace(kind: {{ machine.name }}TraceKind, id: string, name: string): void {
+    this.options.onTrace?.({{ machine.name | quote }}, kind, id, name);
+  }
 
   private checkInvariants(): void {
 {% for s in invariants %}
