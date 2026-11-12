@@ -1,6 +1,6 @@
 [package]
 name = "fsm-generator"
-version = "0.1.1"
+version = "0.6.0"
 edition = "2024"
 description = "Generates code from UML state machines (.fsm files: XMI 2.5.1) with Jinja templates"
 license = "MIT"
