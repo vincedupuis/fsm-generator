@@ -1,10 +1,12 @@
 //! Reads state machine files: XMI 2.5.1 holding a UML 2.5.1 model (plus a UML
 //! DI diagram, which code generation doesn't need). The same reading rules as
-//! `fromXmi` in fsm-editor-vscode/src/xmi.ts, without the layout.
+//! `fromXmi` in fsm-editor-vscode/src/xmi.ts, without the layout, and its
+//! `modelHash`.
 
 use std::collections::HashMap;
 
 use crate::model::{FsmModel, MachineKind, PointKind, Region, Transition, TransitionKind, Vertex, VertexType, js_trim};
+use crate::sha256::sha256;
 use crate::xml::{XmlElement, parse_xml};
 
 const NS_XMI: &str = "http://www.omg.org/spec/XMI/20131001";
@@ -13,6 +15,7 @@ const NS_UMLDI: &str = "http://www.omg.org/spec/UML/20161101/UMLDI";
 const NS_DC: &str = "http://www.omg.org/spec/DD/20100524/DC";
 const NS_DI: &str = "http://www.omg.org/spec/DD/20100524/DI";
 const PROFILE_NS: &str = "https://github.com/vincedupuis/fsm-editor/profiles/FsmStereotypes";
+const EXTENDER: &str = "FSM Editor";
 
 fn type_of(el: &XmlElement) -> String {
     match el.attr("xmi:type") {
@@ -64,11 +67,51 @@ fn body_of(el: Option<&XmlElement>) -> String {
     js_trim(spec.attr("body").or_else(|| spec.attr("value")).unwrap_or("")).to_string()
 }
 
+fn canonical() -> HashMap<&'static str, &'static str> {
+    [(NS_XMI, "xmi"), (NS_UML, "uml"), (NS_UMLDI, "umldi"), (NS_DC, "dc"), (NS_DI, "di")].into_iter().collect()
+}
+
+/// Hash of the state machine model in a file (`text`): the first 16 hex digits of the SHA-256 of the
+/// UTF-8 canonical form of its document element, leaving out the layout. The canonical form writes
+/// each element as `<name a="v" …>text children</name>`, with
+/// - names under the canonical prefixes (as parse_xml gives them), attributes sorted by name, without
+///   the namespace declarations;
+/// - the element's own text, left out when it is only XML white space (space, tab, CR, LF);
+/// - `&`, `<`, `>` and `"` written as `&amp;`, `&lt;`, `&gt;` and `&quot;` in values and text;
+/// - no UML DI elements (the diagram) and no FSM Editor xmi:Extension (colors, groups, the hash itself).
+pub fn model_hash(text: &str) -> Result<String, String> {
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+    fn write(el: &XmlElement, out: &mut String) {
+        if el.ns == NS_UMLDI || (el.name == "xmi:Extension" && el.attr("extender") == Some(EXTENDER)) {
+            return;
+        }
+        out.push('<');
+        out.push_str(&el.name);
+        let mut attrs: Vec<&(String, String)> = el.attrs().iter().collect();
+        attrs.sort_by(|a, b| a.0.cmp(&b.0));
+        for (k, v) in attrs {
+            out.push_str(&format!(" {k}=\"{}\"", esc(v)));
+        }
+        out.push('>');
+        if el.text.chars().any(|c| !matches!(c, ' ' | '\t' | '\r' | '\n')) {
+            out.push_str(&esc(&el.text));
+        }
+        for c in &el.children {
+            write(c, out);
+        }
+        out.push_str(&format!("</{}>", el.name));
+    }
+    let root = parse_xml(text, &canonical()).map_err(|e| e.0)?;
+    let mut out = String::new();
+    write(&root, &mut out);
+    Ok(sha256(&out)[..16].to_string())
+}
+
 /// Parses a state machine file.
 pub fn from_xmi(text: &str) -> Result<FsmModel, String> {
-    let canonical: HashMap<&str, &str> =
-        [(NS_XMI, "xmi"), (NS_UML, "uml"), (NS_UMLDI, "umldi"), (NS_DC, "dc"), (NS_DI, "di")].into_iter().collect();
-    let root = parse_xml(text, &canonical).map_err(|e| e.0)?;
+    let root = parse_xml(text, &canonical()).map_err(|e| e.0)?;
     if root.name != "xmi:XMI" && root.name != "uml:Model" {
         return Err(format!("Not an XMI document: the root element is <{}>, expected <xmi:XMI>.", root.name));
     }

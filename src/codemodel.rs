@@ -106,6 +106,8 @@ pub struct CodeMachine {
     pub documentation: String,
     /// Path of the `.fsm` file, as given to the generator.
     pub source_file: String,
+    /// Hash of the model in the `.fsm` file (16 hex digits, see `model_hash` in xmi.rs); '' when not given.
+    pub model_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -379,6 +381,8 @@ pub struct Options {
     pub submachines: HashMap<String, Rc<CodeModel>>,
     /// Path of the `.fsm` file, shown in generated comments.
     pub source_file: String,
+    /// Hash of the model in the `.fsm` file (`model_hash` in xmi.rs), shown in generated comments.
+    pub model_hash: String,
 }
 
 /// A model the code generator can't handle.
@@ -792,6 +796,7 @@ impl<'a> Builder<'a> {
                 context: m.context.clone(),
                 documentation: m.documentation.clone(),
                 source_file: self.options.source_file.clone(),
+                model_hash: self.options.model_hash.clone(),
             },
             top_regions: regions.iter().filter(|r| r.top).cloned().collect(),
             regions,

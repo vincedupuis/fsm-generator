@@ -25,6 +25,11 @@ impl XmlElement {
         self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
 
+    /// Attributes (name, value), in file order.
+    pub fn attrs(&self) -> &[(String, String)] {
+        &self.attrs
+    }
+
     fn set_attr(&mut self, name: String, value: String) {
         match self.attrs.iter_mut().find(|(k, _)| *k == name) {
             Some(slot) => slot.1 = value,

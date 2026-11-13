@@ -11,6 +11,7 @@ mod languages;
 mod model;
 mod paths;
 mod render;
+mod sha256;
 mod tables;
 mod validation;
 mod xmi;
@@ -19,7 +20,7 @@ mod xml;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use generate::{FileIssue, GenerateError, generate};
+use generate::{FileIssue, GenerateError, GeneratedFile, generate};
 use paths::{absolute, display, expand_glob, slash};
 use render::{Renderer, TemplateError, parse_template};
 
@@ -35,10 +36,14 @@ Options:
   -t, --template <file>  Template (.jinja). A bare name such as \"ts\" means
                          templates/<name>.jinja next to this program.
   -o, --out <folder>     Output folder (default: the current folder).
+      --check            Write nothing: report the files of the output folder
+                         that are missing, or out of date because they don't
+                         hold the model hash of their .fsm file any more.
   -h, --help             Show this help.
   -v, --version          Show the version.
 
-Exit codes: 0 success, 1 errors in the state machines or the template, 2 bad usage.";
+Exit codes: 0 success, 1 errors in the state machines or the template (with
+--check, also files missing or out of date), 2 bad usage.";
 
 /// Why the program stops.
 enum Failure {
@@ -52,6 +57,7 @@ struct Args {
     files: Vec<String>,
     template: String,
     out: String,
+    check: bool,
 }
 
 enum Command {
@@ -64,6 +70,7 @@ fn parse_args(argv: &[String]) -> Result<Command, Failure> {
     let mut files = Vec::new();
     let mut template = None;
     let mut out = ".".to_string();
+    let mut check = false;
     let value = |i: usize, flag: &str| match argv.get(i + 1) {
         Some(v) if !v.starts_with('-') => Ok(v.clone()),
         _ => Err(Failure::Usage(format!("{flag} needs a value."))),
@@ -96,6 +103,7 @@ fn parse_args(argv: &[String]) -> Result<Command, Failure> {
                     }
                 }
             }
+            "--check" => check = true,
             _ => {
                 if a.starts_with('-') && a != "-" {
                     return Err(Failure::Usage(format!("Unknown option {a}.")));
@@ -109,7 +117,7 @@ fn parse_args(argv: &[String]) -> Result<Command, Failure> {
         (true, None) => Ok(Command::Help),
         (true, Some(_)) => Err(Failure::Usage("No .fsm files given.".to_string())),
         (false, None) => Err(Failure::Usage("Missing --template.".to_string())),
-        (false, Some(template)) => Ok(Command::Run(Args { files, template, out })),
+        (false, Some(template)) => Ok(Command::Run(Args { files, template, out, check })),
     }
 }
 
@@ -199,6 +207,9 @@ fn run(args: Args) -> Result<(), Failure> {
     };
     report(&result.issues);
     let out = absolute(&args.out);
+    if args.check {
+        return check(&result.files, &out);
+    }
     for f in &result.files {
         let target = f.path.split('/').fold(out.clone(), |p, part| p.join(part));
         let write = || -> std::io::Result<()> {
@@ -211,6 +222,42 @@ fn run(args: Args) -> Result<(), Failure> {
         println!("wrote {}", display(&target));
     }
     Ok(())
+}
+
+/// `--check`: compares the files of the output folder with the model hashes of their `.fsm` files instead of
+/// writing them. Only files in which the template writes their machine's hash (`machine.modelHash`) are checked:
+/// up to date when the file in the folder holds that hash, missing when it can't be read, out of date otherwise.
+fn check(files: &[GeneratedFile], out: &Path) -> Result<(), Failure> {
+    let mut failed = 0;
+    for f in files {
+        let Some(at) = f.content.find(&f.model_hash).filter(|_| !f.model_hash.is_empty()) else {
+            continue;
+        };
+        let target = f.path.split('/').fold(out.to_path_buf(), |p, part| p.join(part));
+        // Read as Node.js does with 'utf8': invalid sequences become U+FFFD.
+        let text = std::fs::read(&target).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        if text.as_deref().is_some_and(|t| t.contains(&f.model_hash)) {
+            println!("up to date {}", display(&target));
+            continue;
+        }
+        failed += 1;
+        let (line, message) = match text {
+            None => (1, format!("Missing: not generated from {} yet.", f.source)),
+            Some(_) => (
+                f.content[..at].matches('\n').count() + 1,
+                format!(
+                    "Out of date: {} has changed since it was generated (its model hash is now {}).",
+                    f.source, f.model_hash
+                ),
+            ),
+        };
+        eprintln!("{}:{line}: error: {message}", display(&target));
+    }
+    match failed {
+        0 => Ok(()),
+        1 => Err(Failure::Error("1 generated file is missing or out of date.".to_string())),
+        n => Err(Failure::Error(format!("{n} generated files are missing or out of date."))),
+    }
 }
 
 fn main() -> ExitCode {

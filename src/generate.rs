@@ -10,9 +10,9 @@ use std::rc::Rc;
 use crate::codemodel::{CodeModel, Options, to_code_model};
 use crate::model::{FsmModel, SubmachineInfo, VertexType, machine_connection_points};
 use crate::paths::{decode_uri, display, resolve};
-use crate::render::{OutputFile, Renderer, TemplateError};
+use crate::render::{Renderer, TemplateError};
 use crate::validation::{Severity, validate};
-use crate::xmi::from_xmi;
+use crate::xmi::{from_xmi, model_hash};
 
 pub struct FileIssue {
     /// The file, as displayed.
@@ -23,8 +23,18 @@ pub struct FileIssue {
     pub message: String,
 }
 
+/// A file to write, with the machine it was generated from.
+pub struct GeneratedFile {
+    pub path: String,
+    pub content: String,
+    /// The machine's `.fsm` file, as displayed (for a file shared by several machines, the first one).
+    pub source: String,
+    /// Its model hash (`model_hash` in xmi.rs).
+    pub model_hash: String,
+}
+
 pub struct GenerateResult {
-    pub files: Vec<OutputFile>,
+    pub files: Vec<GeneratedFile>,
     /// Validation problems and what the template reported.
     pub issues: Vec<FileIssue>,
 }
@@ -46,6 +56,8 @@ impl GenerateError {
 
 struct Loaded {
     model: FsmModel,
+    /// `model_hash` of the file.
+    hash: String,
     /// href as written in this model → path of the loaded machine.
     refs: Vec<(String, PathBuf)>,
     code: Option<Rc<CodeModel>>,
@@ -77,13 +89,15 @@ impl Loader {
         let model = from_xmi(&text)
             .map_err(|e| GenerateError::new(format!("{} is not a valid state machine file: {e}", display(path))))?;
         Loader::check_id(path, &model, expected_id)?;
+        // The file reads as XML, so it hashes.
+        let hash = model_hash(&text).unwrap_or_default();
         let hrefs: Vec<(String, String)> = model
             .vertices
             .iter()
             .filter(|v| v.vtype == VertexType::State)
             .filter_map(|v| v.submachine.clone().map(|s| (v.id.clone(), s)))
             .collect();
-        self.loaded.insert(path.to_path_buf(), Loaded { model, refs: Vec::new(), code: None });
+        self.loaded.insert(path.to_path_buf(), Loaded { model, hash, refs: Vec::new(), code: None });
 
         // Submachines, then validation with what is known about them.
         let mut info: HashMap<String, SubmachineInfo> = HashMap::new();
@@ -147,7 +161,7 @@ impl Loader {
         for (href, sub) in refs {
             submachines.insert(href, self.code_of(&sub)?);
         }
-        let options = Options { submachines, source_file: display(path) };
+        let options = Options { submachines, source_file: display(path), model_hash: self.loaded[path].hash.clone() };
         let code = match to_code_model(&self.loaded[path].model, &options) {
             Ok(code) => Rc::new(code),
             Err(e) => {
@@ -181,7 +195,7 @@ pub fn generate(sources: &[PathBuf], renderer: &Renderer) -> Result<GenerateResu
         return Err(loader.failed());
     }
 
-    let mut files: Vec<OutputFile> = Vec::new();
+    let mut files: Vec<GeneratedFile> = Vec::new();
     let mut owner: HashMap<String, PathBuf> = HashMap::new();
     let mut done = HashSet::new();
     for path in sources {
@@ -208,7 +222,12 @@ pub fn generate(sources: &[PathBuf], renderer: &Renderer) -> Result<GenerateResu
                 )));
             }
             owner.insert(f.path.clone(), path.clone());
-            files.push(f);
+            files.push(GeneratedFile {
+                path: f.path,
+                content: f.content,
+                source: display(path),
+                model_hash: loader.loaded[path].hash.clone(),
+            });
         }
     }
     let errors = loader.issues.iter().filter(|i| i.severity == Severity::Error).count();
