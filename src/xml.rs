@@ -237,7 +237,9 @@ impl<'a> Parser<'a> {
 /// Parses `text` and returns the document element.
 /// `canonical` maps namespace URIs to the prefix used in the returned names.
 pub fn parse_xml(text: &str, canonical: &HashMap<&str, &str>) -> Result<XmlElement, XmlError> {
-    let mut p = Parser { text, i: 0, line: 1 };
+    // Line ends as XML 1.0 (2.11) has them read: \r\n and a lone \r become \n (a &#13; reference still gives \r).
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut p = Parser { text: &normalized, i: 0, line: 1 };
     // Prolog
     loop {
         p.skip_space();
