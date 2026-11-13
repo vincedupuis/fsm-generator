@@ -87,9 +87,17 @@ pub fn validate(model: &FsmModel, submachines: &HashMap<String, SubmachineInfo>)
     let protocol = model.kind == MachineKind::Protocol;
     use Severity::*;
 
-    // Identity
+    // Identity (a region id used again can also put a state inside its own region)
+    let all_regions: Vec<_> =
+        model.regions.iter().chain(model.vertices.iter().flat_map(|v| v.regions.iter())).collect();
     let mut seen = HashSet::new();
-    for id in model.vertices.iter().map(|v| &v.id).chain(model.transitions.iter().map(|t| &t.id)) {
+    for id in model
+        .vertices
+        .iter()
+        .map(|v| &v.id)
+        .chain(model.transitions.iter().map(|t| &t.id))
+        .chain(all_regions.iter().map(|r| &r.id))
+    {
         if !seen.insert(id.as_str()) {
             c.add(id, Error, format!("Duplicate id '{id}'."));
         }
@@ -144,8 +152,6 @@ pub fn validate(model: &FsmModel, submachines: &HashMap<String, SubmachineInfo>)
     }
 
     // Regions
-    let all_regions: Vec<_> =
-        model.regions.iter().chain(model.vertices.iter().flat_map(|v| v.regions.iter())).collect();
     for r in all_regions {
         let kids: Vec<&crate::model::Vertex> = c.ix.children_of(&r.id).into_iter().map(|k| c.ix.v(k)).collect();
         let count = |t: VertexType| kids.iter().filter(|k| k.vtype == t).map(|k| k.id.as_str()).collect::<Vec<_>>();
@@ -676,7 +682,8 @@ fn check_text(c: &mut Checker) {
 
 fn check_reachability(c: &mut Checker) {
     let model = c.model;
-    let root_initial = c.ix.initial_of(model.regions.first().map_or("", |r| r.id.as_str()));
+    // Every top-level region is entered when the machine starts.
+    let root_initials: Vec<Option<usize>> = model.regions.iter().map(|r| c.ix.initial_of(&r.id)).collect();
     // The machine can also be entered through its own entry points (from a referencing submachine state).
     let machine_entries: Vec<usize> = (0..model.vertices.len())
         .filter(|&i| {
@@ -684,10 +691,16 @@ fn check_reachability(c: &mut Checker) {
             v.vtype == VertexType::EntryPoint && model.regions.iter().any(|r| r.id == v.parent)
         })
         .collect();
-    if root_initial.is_none() && machine_entries.is_empty() {
-        if model.vertices.iter().any(|v| v.vtype == VertexType::State) {
-            c.add("", Severity::Warning, "The top-level region has no initial pseudostate.".into());
+    if machine_entries.is_empty() {
+        for (r, initial) in model.regions.iter().zip(&root_initials) {
+            if initial.is_none()
+                && c.ix.children_of(&r.id).into_iter().any(|k| model.vertices[k].vtype == VertexType::State)
+            {
+                c.add("", Severity::Warning, "The top-level region has no initial pseudostate.".into());
+            }
         }
+    }
+    if root_initials.iter().all(Option::is_none) && machine_entries.is_empty() {
         return;
     }
     let mut reached: HashSet<String> = HashSet::new();
@@ -699,7 +712,9 @@ fn check_reachability(c: &mut Checker) {
             queue.push_back(v);
         }
     };
-    visit(root_initial, &mut reached, &mut queue);
+    for &initial in &root_initials {
+        visit(initial, &mut reached, &mut queue);
+    }
     for e in machine_entries {
         visit(Some(e), &mut reached, &mut queue);
     }

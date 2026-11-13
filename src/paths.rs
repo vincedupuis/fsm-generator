@@ -54,8 +54,9 @@ fn escape_at(bytes: &[u8], i: usize) -> Option<u8> {
     Some((h * 16 + l) as u8)
 }
 
-/// `decodeURI`: decodes `%XX` escapes (UTF-8), except those of reserved characters (`;/?:@&=+$,#`). Malformed
-/// escapes are kept as they are.
+/// `decodeURI`: decodes `%XX` escapes (UTF-8), except those of reserved characters (`;/:@&=+$,`; unlike
+/// `decodeURI`, `%23` and `%3F` give `#` and `?`, which hrefs encode in file names). Malformed escapes are kept as
+/// they are.
 pub fn decode_uri(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -77,7 +78,7 @@ pub fn decode_uri(s: &str) -> String {
                 j += 3;
             }
             if let Ok(text) = std::str::from_utf8(&run) {
-                if len == 1 && ";/?:@&=+$,#".contains(text) {
+                if len == 1 && ";/:@&=+$,".contains(text) {
                     out.extend_from_slice(&bytes[i..j]);
                 } else {
                     out.extend_from_slice(text.as_bytes());
@@ -258,7 +259,7 @@ mod tests {
     #[test]
     fn uris() {
         assert_eq!(decode_uri("My%20Machine.fsm"), "My Machine.fsm");
-        assert_eq!(decode_uri("a%23b%2Fc"), "a%23b%2Fc");
+        assert_eq!(decode_uri("a%23b%2Fc%3F"), "a#b%2Fc?");
         assert_eq!(decode_uri("caf%C3%A9%zz"), "café%zz");
     }
 
