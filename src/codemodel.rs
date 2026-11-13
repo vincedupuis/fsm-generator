@@ -1657,7 +1657,10 @@ impl<'a> Builder<'a> {
         let activities = if is_final {
             Vec::new()
         } else {
-            self.calls(&vx.do_activity, &format!("do of {name}"), &vx.id, SetKind::Activities)?
+            // Listed twice, an activity is still started, stopped and awaited once.
+            let mut seen = HashSet::new();
+            let calls = self.calls(&vx.do_activity, &format!("do of {name}"), &vx.id, SetKind::Activities)?;
+            calls.into_iter().filter(|c| seen.insert(c.clone())).collect()
         };
         let timer_steps: Vec<CodeTimer> = self.timers.iter().filter(|t| t.state_index == index).cloned().collect();
         let timers = timer_steps.iter().map(|t| Ref { name: t.name.clone(), index: t.index }).collect();
@@ -1866,8 +1869,17 @@ impl<'a> Builder<'a> {
         let outs = self.ix.outgoing(&vx.id);
         let mut alts = one(Vec::new());
         for t in &outs {
-            let segment = self.segment(v, t)?;
-            alts = seq(alts, segment);
+            // The machine is not active yet: a transition into another top-level region than the point's enters
+            // only that region (as a segment, it would exit every top-level region and enter them all).
+            let target = self.vertex(&t.target)?;
+            let ways = if self.common_region(&[v, target])?.is_none() {
+                let first = self.chain(target)?[0];
+                let effect = self.effect(t)?;
+                seq(one(effect), self.enter_region(first, &[target])?)
+            } else {
+                self.segment(v, t)?
+            };
+            alts = seq(alts, ways);
         }
         let mut entered = HashSet::new();
         for t in &outs {

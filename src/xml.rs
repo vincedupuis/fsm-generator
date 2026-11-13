@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use crate::model::js_space;
+
 #[derive(Debug, Clone)]
 pub struct XmlElement {
     /// Qualified name using the canonical prefix when the namespace is known, e.g. `uml:Model`.
@@ -145,7 +147,7 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_space(&mut self) {
-        let n: usize = self.rest().chars().take_while(|c| c.is_whitespace()).map(char::len_utf8).sum();
+        let n: usize = self.rest().chars().take_while(|c| js_space(*c)).map(char::len_utf8).sum();
         self.advance(self.i + n);
     }
 

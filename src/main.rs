@@ -133,7 +133,9 @@ fn sources(patterns: &[String]) -> Result<Vec<PathBuf>, Failure> {
 /// The template file: a path, or a bare name looked up in the `templates` folder next to the program (or, for
 /// `cargo run`, of the project).
 fn template_path(name: &str) -> Result<PathBuf, Failure> {
-    if name.contains(['/', '\\']) || name.to_lowercase().ends_with(".jinja") || Path::new(name).exists() {
+    // A bare name is a file of the current folder only when there is one: a folder named like the template
+    // (e.g. the output folder of `-t ts -o ts`) is not.
+    if name.contains(['/', '\\']) || name.to_lowercase().ends_with(".jinja") || Path::new(name).is_file() {
         return Ok(absolute(name));
     }
     let exe = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok());

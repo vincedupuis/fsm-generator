@@ -339,7 +339,12 @@ impl<'a> ModelIndex<'a> {
     }
 }
 
-/// `String.prototype.trim()`: Unicode white space and the byte order mark.
+/// JavaScript's white space (`\s`, `trim()`): Unicode white space but U+0085, and the byte order mark.
+pub fn js_space(c: char) -> bool {
+    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+}
+
+/// `String.prototype.trim()`.
 pub fn js_trim(s: &str) -> &str {
-    s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+    s.trim_matches(js_space)
 }

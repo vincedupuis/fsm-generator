@@ -19,7 +19,7 @@
 
 use serde::Serialize;
 
-use crate::model::js_trim;
+use crate::model::{js_space, js_trim};
 
 /// A condition tree: `{ op: "call", name }`, `{ op: "not", arg }`, `{ op: "and" | "or", args }`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -71,7 +71,7 @@ fn tokenize(text: &str) -> Result<Vec<Token>, String> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_whitespace() || c == '\u{feff}' {
+        if js_space(c) {
             i += 1;
         } else if c.is_ascii_alphabetic() || c == '_' {
             let mut j = i + 1;
@@ -218,7 +218,7 @@ pub fn parse_actions(text: &str) -> Result<Vec<String>, String> {
     let mut s = js_trim(text);
     // A trailing ';' (and the white space after it) is allowed.
     if let Some(semi) = s.rfind(';')
-        && s[semi + 1..].chars().all(char::is_whitespace)
+        && s[semi + 1..].chars().all(js_space)
     {
         s = &s[..semi];
     }
@@ -258,7 +258,7 @@ fn starts_with_word(s: &str, word: &str) -> bool {
 /// `s` without its first `(` and what follows, nor the white space before it.
 fn before_paren(s: &str) -> &str {
     match s.find('(') {
-        Some(i) => s[..i].trim_end(),
+        Some(i) => s[..i].trim_end_matches(js_space),
         None => s,
     }
 }
@@ -292,8 +292,8 @@ pub fn check_name(text: &str) -> Result<(), String> {
 
 /// `after(<number><unit>)`: the number's text and the unit.
 fn parse_time(s: &str) -> Option<(&str, &str)> {
-    let rest = s.strip_prefix("after")?.trim_start();
-    let rest = rest.strip_prefix('(')?.trim_start();
+    let rest = s.strip_prefix("after")?.trim_start_matches(js_space);
+    let rest = rest.strip_prefix('(')?.trim_start_matches(js_space);
     let int = rest.bytes().take_while(u8::is_ascii_digit).count();
     if int == 0 {
         return None;
@@ -306,7 +306,7 @@ fn parse_time(s: &str) -> Option<(&str, &str)> {
         }
     }
     let number = &rest[..n];
-    let rest = rest[n..].trim_start();
+    let rest = rest[n..].trim_start_matches(js_space);
     let unit_len = if rest.starts_with("ms") {
         2
     } else if rest.starts_with(['s', 'm', 'h']) {
@@ -315,7 +315,7 @@ fn parse_time(s: &str) -> Option<(&str, &str)> {
         return None;
     };
     let unit = &rest[..unit_len];
-    let rest = rest[unit_len..].trim_start();
+    let rest = rest[unit_len..].trim_start_matches(js_space);
     if rest == ")" { Some((number, unit)) } else { None }
 }
 

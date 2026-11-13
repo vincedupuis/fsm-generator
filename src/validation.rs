@@ -509,7 +509,7 @@ pub fn validate(model: &FsmModel, submachines: &HashMap<String, SubmachineInfo>)
             && c.ix
                 .outgoing(&sv.id)
                 .iter()
-                .filter(|o| o.kind != TransitionKind::Internal && o.triggers.is_empty())
+                .filter(|o| o.kind != TransitionKind::Internal && o.triggers.is_empty() && o.guard.is_empty())
                 .count()
                 > 1
         {
